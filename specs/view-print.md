@@ -50,11 +50,41 @@ document.querySelectorAll('body, body *')
 
 `<html>`, `<head>` и их потомки (кроме `<body>`) не включаются. Корневой элемент графа — `<body>`.
 
+### 2. Role и accessible name
+
+Для каждого элемента в снапшоте определяются:
+
+- `role` — явный (`role` атрибут) или неявный по тегу (`button`, `link`, `heading`, `textbox`, `img` и др.).
+- `name` — accessible name по приоритету: `aria-labelledby`, `aria-label`, `<label>`, `alt`, `title`, `placeholder`, текст кнопки/ссылки.
+
 ### 2. Текст
 
 Свойство `text` заполняется только из **непосредственных** текстовых дочерних узлов элемента (nodeType === TEXT_NODE), без рекурсии в дочерние элементы. Пустые и whitespace-only значения не включаются. Содержимое `<script>` и `<style>` исключается для всех элементов, включая родителей. Для самих `<script>`/`<style>` `text` не заполняется.
 
 Пример: для `<div>Hello <span>world</span>!</div>` у `div` будет `text: "Hello !"`, у `span` — `text: "world"`.
+
+### 3. Snapshot — accessibility tree с refs
+
+`Snapshot` возвращает иерархическое accessibility-дерево элементов внутри `<body>`. Каждый узел содержит `ref` (например, `e2`), который можно использовать в `click @e2` и `inspect @e2`.
+
+```json
+{
+  "url": "https://example.com",
+  "viewport": { "width": 1280, "height": 720 },
+  "tree": [
+    {
+      "ref": "e1",
+      "tag": "body",
+      "boundingBox": { ... },
+      "children": [
+        { "ref": "e2", "tag": "button", "role": "button", "name": "Submit", "text": "Submit", "children": [] }
+      ]
+    }
+  ]
+}
+```
+
+Узлы без `role`/`name`/`text`, но имеющие значимых потомков, поднимаются вверх; пустые контейнеры пропускаются.
 
 ### 3. Capture — облегчённый граф
 
@@ -162,6 +192,7 @@ CLI работает как клиент: проверяет демон, авт�
 | Метод | Путь | Тело | Ответ |
 |-------|------|------|-------|
 | POST | `/sessions/:name/capture` | `{ url?: string; viewport?: { width; height } }` | Snapshot `Graph` |
+| POST | `/sessions/:name/snapshot` | `{ url?: string; viewport?: { width; height } }` | Accessibility `Snapshot` tree |
 | POST | `/sessions/:name/inspect` | `{ elementId: string }` | Полный `ElementNode` |
 | POST | `/sessions/:name/click` | `{ elementId: string }` | `{ clicked: true }` |
 | GET | `/sessions/:name/status` | — | `{ url?: string; elementCount: number }` |
@@ -173,6 +204,7 @@ CLI работает как клиент: проверяет демон, авт�
 
 ```bash
 viewprint -s <session> capture [<url>] [--viewport WIDTHxHEIGHT]
+viewprint -s <session> snapshot [<url>] [--viewport WIDTHxHEIGHT]
 viewprint -s <session> inspect <elementId>
 viewprint -s <session> click <elementId>
 viewprint -s <session> status
@@ -190,13 +222,112 @@ viewprint daemon status
 - Интеграционные тесты для `ViewPrintDaemon`.
 - Все внешние зависимости (сеть, FS) замоканы где возможно.
 
-## Критерии приёмки
+## ### 12. Actions
 
-- [ ] `capture` возвращает облегчённый граф без `computedStyles`, `cascade` и `pseudo`.
-- [ ] `inspect <elementId>` возвращает полные данные элемента со всеми CSS-данными и псевдо-элементами.
-- [ ] `capture` с `--viewport 1920x1080` возвращает граф с указанным viewport.
-- [ ] `click` возвращает `{ clicked: true }` и не пересчитывает граф.
-- [ ] Граф содержит только `<body>` и потомков; `<html>`/`\u003chead>` исключены.
-- [ ] Текст `<script>`/`\u003cstyle>` не попадает в `text` ни для самих элементов, ни для родителей.
-- [ ] Все unit-тесты проходят (`pnpm test`).
-- [ ] Линтер не выдаёт ошибок (`pnpm run lint`).
+Команды для взаимодействия с элементами страницы:
+
+- `click <elementId|@e2>` — кликает по элементу.
+- `fill <elementId|@e2> <text>` — устанавливает значение input/textarea.
+- `type <elementId|@e2> <text>` — печатает текст посимвольно.
+- `hover <elementId|@e2>` — наводит курсор.
+- `focus <elementId|@e2>` — фокусирует элемент.
+- `press <key>` — нажимает клавишу.
+- `scroll <direction> <px> [elementId]` — прокручивает.
+- `scrollintoview <elementId|@e2>` — прокручивает до видимости.
+- `wait` — ожидает условия (`text`, `selector`, `fn`, `loadState`, `timeout`).
+- `eval <script>` — выполняет JS и возвращает результат.
+- `read [--format text|markdown]` — извлекает читаемый текст или markdown.
+
+### 13. Batch
+
+`batch` принимает JSON-массив команд (JSON stdin или позиционные аргументы):
+
+```bash
+viewprint -s test batch '[["capture","https://example.com"],["snapshot"],["click","@e2"]]'
+echo '[["capture","https://example.com"],["snapshot"]]' | viewprint -s test batch
+```
+
+Каждый элемент — `[commandName, ...args]` или `[commandName, optionsObject]`.
+
+### 14. Network и storage
+
+**Network:**
+
+- `network requests` — список отслеженных запросов (после `track start`).
+- `network track start|stop` — включает/выключает отслеживание.
+- `network har start|stop --path <file>` — HAR-логирование.
+- `network route --url <pattern> [--body B] [--status N] [--content-type CT] [--abort]` — мокирование запросов.
+- `network unroute --url <pattern>` — снимает mock.
+
+**Storage:**
+
+- `cookies get|set|clear` — управление cookies.
+- `storage local|session get|set|clear` — localStorage и sessionStorage.
+
+State сессии (`~/.viewprint/sessions/<name>/state.json`) включает cookies, localStorage, sessionStorage и URL. Они восстанавливаются при следующем `capture`.
+
+### 15. Tabs, frames, screenshots
+
+**Tabs:**
+
+- `tabs list` — список вкладок.
+- `tabs new [url]` — открыть новую вкладку.
+- `tabs switch <index>` — переключиться.
+- `tabs close [index]` — закрыть.
+
+**Frames:**
+
+- `frames list` — список фреймов.
+- `frames switch <selector>` — переключиться на frame.
+- `frames main` — вернуться в main frame.
+
+**Screenshots:**
+
+- `screenshot [path]` — скриншот страницы.
+- `screenshot <path> --element <elementId|@e2>` — скриншот элемента.
+
+Пути по умолчанию: `~/.viewprint/screenshots/<session>-<type>-<timestamp>.png`.
+
+### 16. MCP server
+
+`viewprint mcp` запускает Model Context Protocol сервер через stdio.
+
+Реализует JSON-RPC 2.0 методы:
+
+- `initialize` — инициализация MCP.
+- `tools/list` — список инструментов.
+- `tools/call` — вызов инструмента.
+
+Tools: `capture`, `snapshot`, `click`, `fill`, `inspect`, `eval`, `read`, `status`.
+
+### 17. Advanced: dialogs, diff
+
+**Dialogs:**
+
+- `dialog --handler '{"accept":true,"promptText":"ok"}'` — устанавливает обработчик alert/confirm/prompt.
+
+**Diff:**
+
+- `diff last` — сравнение текущего графа с предыдущим (added/removed/changed).
+
+## Критерии приёмки (обновлённые)
+
+- [x] `capture` возвращает облегчённый граф без `computedStyles`, `cascade` и `pseudo`.
+- [x] `inspect <elementId>` возвращает полные данные элемента со всеми CSS-данными и псевдо-элементами.
+- [x] `capture` с `--viewport 1920x1080` возвращает граф с указанным viewport.
+- [x] `click` возвращает `{ clicked: true }` и не пересчитывает граф.
+- [x] Граф содержит только `<body>` и потомков; `<html>`/`<head>` исключены.
+- [x] Текст `<script>`/`<style>` не попадает в `text`.
+- [x] **Actions**: fill, type, hover, focus, press, scroll, scrollIntoView, wait, eval.
+- [x] **Batch**: JSON stdin и позиционные команды.
+- [x] **Network**: requests, HAR, route, unroute.
+- [x] **Storage**: cookies, localStorage, sessionStorage (get/set/clear).
+- [x] **Tabs**: list, new, switch, close.
+- [x] **Frames**: list, switch, main.
+- [x] **Screenshots**: page и element.
+- [x] **Read**: text и markdown.
+- [x] **MCP server**: tools/list, tools/call через stdio.
+- [x] **Dialogs**: обработчик alert/confirm/prompt.
+- [x] **Diff**: сравнение графов.
+- [x] Все тесты проходят (`pnpm test`).
+- [x] Линтер не выдаёт ошибок (`pnpm run lint`).

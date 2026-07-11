@@ -1,0 +1,52 @@
+import type { Graph } from './types.js'
+
+export interface GraphDiff {
+    added: string[]
+    removed: string[]
+    changed: Array<{
+        id: string
+        tag: string
+        changes: Record<string, { from: unknown; to: unknown }>
+    }>
+}
+
+export function diffGraphs(before: Graph, after: Graph): GraphDiff {
+    const added: string[] = []
+    const removed: string[] = []
+    const changed: GraphDiff['changed'] = []
+
+    for (const [id, afterNode] of Object.entries(after.nodes)) {
+        const beforeNode = before.nodes[id]
+        if (!beforeNode) {
+            added.push(id)
+            continue
+        }
+
+        const changes: Record<string, { from: unknown; to: unknown }> = {}
+
+        if (beforeNode.text !== afterNode.text) {
+            changes.text = { from: beforeNode.text, to: afterNode.text }
+        }
+        if (beforeNode.name !== afterNode.name) {
+            changes.name = { from: beforeNode.name, to: afterNode.name }
+        }
+        if (JSON.stringify(beforeNode.attributes) !== JSON.stringify(afterNode.attributes)) {
+            changes.attributes = { from: beforeNode.attributes, to: afterNode.attributes }
+        }
+        if (JSON.stringify(beforeNode.boundingBox) !== JSON.stringify(afterNode.boundingBox)) {
+            changes.boundingBox = { from: beforeNode.boundingBox, to: afterNode.boundingBox }
+        }
+
+        if (Object.keys(changes).length > 0) {
+            changed.push({ id, tag: afterNode.tag, changes })
+        }
+    }
+
+    for (const id of Object.keys(before.nodes)) {
+        if (!after.nodes[id]) {
+            removed.push(id)
+        }
+    }
+
+    return { added, removed, changed }
+}

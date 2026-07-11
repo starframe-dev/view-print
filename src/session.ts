@@ -12,17 +12,20 @@ export function getSessionPath(name: string): string {
 export function loadSession(name: string): SessionState {
     const filePath = getSessionPath(name)
     if (!fs.existsSync(filePath)) {
-        return { name, cookies: [], localStorage: {} }
+        const state: SessionState = { name, cookies: [], localStorage: {}, sessionStorage: {} }
+    return state
     }
 
     const data = fs.readFileSync(filePath, 'utf-8')
     const parsed = JSON.parse(data) as SessionState
-    return {
+    const state: SessionState = {
         name: parsed.name,
         url: parsed.url,
-        cookies: parsed.cookies || [],
-        localStorage: parsed.localStorage || {}
+        cookies: (parsed.cookies || []) as SessionState['cookies'],
+        localStorage: parsed.localStorage || {},
+        sessionStorage: parsed.sessionStorage || {}
     }
+    return state
 }
 
 export function saveSession(state: SessionState): void {

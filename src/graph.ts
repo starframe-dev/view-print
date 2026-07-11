@@ -13,6 +13,7 @@ export function buildGraph(
             parentId: raw.parentId,
             tag: raw.tag,
             role: raw.role,
+            name: raw.name,
             attributes: raw.attributes,
             text: raw.text,
             boundingBox: raw.boundingBox

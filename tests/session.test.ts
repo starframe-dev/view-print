@@ -20,6 +20,7 @@ describe('session', () => {
         expect(session.name).toBe('test')
         expect(session.cookies).toEqual([])
         expect(session.localStorage).toEqual({})
+        expect(session.sessionStorage).toEqual({})
         expect(session.url).toBeUndefined()
     })
 
@@ -30,16 +31,18 @@ describe('session', () => {
         const state = {
             name: 'test',
             url: 'https://example.com',
-            cookies: [{ name: 'session', value: 'abc' }],
-            localStorage: { token: 'xyz' }
+            cookies: [{ name: 'session', value: 'abc', domain: 'example.com', path: '/' }],
+            localStorage: { token: 'xyz' },
+            sessionStorage: { csrf: '123' }
         }
 
         saveSession(state)
         const loaded = loadSession('test')
 
         expect(loaded.url).toBe('https://example.com')
-        expect(loaded.cookies).toEqual([{ name: 'session', value: 'abc' }])
+        expect(loaded.cookies).toEqual([{ name: 'session', value: 'abc', domain: 'example.com', path: '/' }])
         expect(loaded.localStorage).toEqual({ token: 'xyz' })
+        expect(loaded.sessionStorage).toEqual({ csrf: '123' })
     })
 
     it('handles missing fields gracefully', async () => {
@@ -55,5 +58,6 @@ describe('session', () => {
 
         expect(loaded.cookies).toEqual([])
         expect(loaded.localStorage).toEqual({})
+        expect(loaded.sessionStorage).toEqual({})
     })
 })

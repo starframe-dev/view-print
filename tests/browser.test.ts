@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import http from 'node:http'
+import { AddressInfo } from 'node:net'
+import { describe, expect, it } from 'vitest' 
 import { createBrowserSession } from '../src/browser.js'
 import type { ElementNode } from '../src/types.js'
 
@@ -123,6 +125,211 @@ describe('BrowserSession', () => {
             const graph = await session.capture(testPage, { width: 1920, height: 1080 })
 
             expect(graph.viewport).toEqual({ width: 1920, height: 1080 })
+        } finally {
+            await session.close()
+        }
+    })
+
+    it('captures accessibility snapshot tree', async () => {
+        const session = await createBrowserSession('test-snapshot')
+        try {
+            const snapshot = await session.snapshot(testPage, { width: 1280, height: 720 })
+
+            expect(snapshot.url).toBe(testPage)
+            expect(snapshot.tree.length).toBeGreaterThan(0)
+
+            const root = snapshot.tree[0]
+            expect(root.tag).toBe('body')
+            expect(root.children.length).toBeGreaterThan(0)
+
+            const button = root.children.find((node) => node.role === 'button')
+            expect(button).toBeDefined()
+            expect(button!.name).toBe('Add')
+        } finally {
+            await session.close()
+        }
+    })
+
+    it('fills input and evaluates JavaScript', async () => {
+        const session = await createBrowserSession('test-actions')
+        try {
+            const actionPage = `data:text/html,${encodeURIComponent(`
+                <!DOCTYPE html>
+                <html>
+                <body>
+                    <input id="email" type="text" />
+                    <div id="result"></div>
+                </body>
+                </html>
+            `)}`
+
+            await session.capture(actionPage)
+            await session.fill('e2', 'hello@example.com')
+
+            const value = await session.eval("document.getElementById('email').value")
+            expect(value).toBe('hello@example.com')
+        } finally {
+            await session.close()
+        }
+    })
+
+    it('mocks network route and reads response', async () => {
+        const server = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end(`<html><body>
+                <script>
+                    fetch('/api/data').then(r => r.json()).then(d => {
+                        window.__result = d
+                    })
+                </script>
+            </body></html>`)
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const port = (server.address() as AddressInfo).port
+        const url = `http://localhost:${port}`
+
+        const session = await createBrowserSession('test-route')
+        try {
+            await session.route('**/api/data', { body: JSON.stringify({ ok: true }) })
+            await session.capture(url)
+            await session.wait({ fn: "typeof window.__result !== 'undefined'", timeout: 5000 })
+
+            const result = await session.eval('window.__result')
+            expect(result).toEqual({ ok: true })
+        } finally {
+            await session.close()
+            server.close()
+        }
+    })
+
+    it('sets and reads cookies', async () => {
+        const server = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<html><body></body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const port = (server.address() as AddressInfo).port
+        const url = `http://localhost:${port}`
+
+        const session = await createBrowserSession('test-cookies')
+        try {
+            await session.capture(url)
+            await session.setCookie('session', 'abc')
+
+            const cookies = await session.getCookies()
+            expect(cookies.some((c) => c.name === 'session' && c.value === 'abc')).toBe(true)
+        } finally {
+            await session.close()
+            server.close()
+        }
+    })
+
+    it('sets and reads localStorage', async () => {
+        const server = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<html><body></body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const port = (server.address() as AddressInfo).port
+        const url = `http://localhost:${port}`
+
+        const session = await createBrowserSession('test-storage')
+        try {
+            await session.capture(url)
+            await session.setLocalStorage('key', 'value')
+
+            const data = await session.getLocalStorage()
+            expect(data.key).toBe('value')
+        } finally {
+            await session.close()
+            server.close()
+        }
+    })
+
+    it('manages multiple browser tabs', async () => {
+        const server = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<html><body></body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const port = (server.address() as AddressInfo).port
+        const url = `http://localhost:${port}`
+
+        const session = await createBrowserSession('test-tabs')
+        try {
+            await session.capture(url)
+            await session.newTab(url)
+            const tabs = await session.listTabs()
+            expect(tabs.length).toBe(2)
+        } finally {
+            await session.close()
+            server.close()
+        }
+    })
+
+    it('takes page screenshot', async () => {
+        const server = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<html><body></head></body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const port = (server.address() as AddressInfo).port
+        const url = `http://localhost:${port}`
+
+        const session = await createBrowserSession('test-screenshot')
+        try {
+            await session.capture(url)
+            const path = await session.screenshotPage('/tmp/view-print-test-page.png')
+            expect(path).toBe('/tmp/view-print-test-page.png')
+        } finally {
+            await session.close()
+            server.close()
+        }
+    })
+
+    it('reads text content from the page', async () => {
+        const server = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<html><body><h1>Title</h1><p>Hello world</p></body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const port = (server.address() as AddressInfo).port
+        const url = `http://localhost:${port}`
+
+        const session = await createBrowserSession('test-read')
+        try {
+            await session.capture(url)
+
+            const text = await session.read('text')
+            expect(text).toContain('Title')
+            expect(text).toContain('Hello world')
+
+            const md = await session.read('markdown')
+            expect(md).toContain('# Title')
+            expect(md).toContain('Hello world')
+        } finally {
+            await session.close()
+            server.close()
+        }
+    })
+
+    it('waits for text condition', async () => {
+        const session = await createBrowserSession('test-wait')
+        try {
+            const waitPage = `data:text/html,${encodeURIComponent(`
+                <!DOCTYPE html>
+                <html>
+                <body>
+                    <div id="target">Initial</div>
+                    <script>
+                        setTimeout(() => document.getElementById('target').textContent = 'Ready', 200)
+                    </script>
+                </body>
+                </html>
+            `)}`
+
+            await session.capture(waitPage)
+            await session.wait({ text: 'Ready', timeout: 5000 })
         } finally {
             await session.close()
         }

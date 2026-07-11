@@ -4,6 +4,7 @@ export { extractSnapshotData, inspectElement } from './extractor.js'
 export { deleteSession, listSessions, loadSession, saveSession } from './session.js'
 export { ViewPrintDaemon, startDaemon } from './daemon.js'
 export { DaemonClient, createDaemonClient } from './daemon-client.js'
+export { runMcpServer } from './mcp.js'
 export {
     ensureDaemonRunning,
     getDaemonPort,
@@ -18,10 +19,14 @@ export type {
     ElementNode,
     ElementNodeBase,
     Graph,
+    NetworkRequest,
+    NetworkRoute,
     PseudoElementData,
     PseudoElementNode,
     RawElementData,
     RawSnapshotElement,
     SessionState,
-    SnapshotElementNode
-} from './types.js'
+    Snapshot,
+    SnapshotElementNode,
+    SnapshotNode
+} from './types.js' 

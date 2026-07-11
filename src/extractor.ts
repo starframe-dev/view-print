@@ -17,6 +17,96 @@ export function extractSnapshotData(): RawSnapshotElement[] {
         return normalized ? normalized : undefined
     }
 
+    function getRole(element: Element): string | undefined {
+        const explicit = element.getAttribute('role')
+        if (explicit) {
+            return explicit
+        }
+
+        const tag = element.tagName.toLowerCase()
+        const roleMap: Record<string, string> = {
+            a: 'link',
+            button: 'button',
+            h1: 'heading',
+            h2: 'heading',
+            h3: 'heading',
+            h4: 'heading',
+            h5: 'heading',
+            h6: 'heading',
+            img: 'img',
+            input: 'textbox',
+            nav: 'navigation',
+            main: 'main',
+            header: 'banner',
+            footer: 'contentinfo',
+            aside: 'complementary',
+            section: 'region',
+            article: 'article',
+            form: 'form',
+            table: 'table',
+            ul: 'list',
+            ol: 'list',
+            li: 'listitem',
+            select: 'combobox',
+            textarea: 'textbox'
+        }
+
+        return roleMap[tag]
+    }
+
+    function getAccessibleName(element: Element): string | undefined {
+        const labelledBy = element.getAttribute('aria-labelledby')
+        if (labelledBy) {
+            const name = labelledBy.split(/\s+/)
+                .map((id) => document.getElementById(id)?.textContent || '')
+                .join(' ')
+                .trim()
+            if (name) {
+                return name
+            }
+        }
+
+        const ariaLabel = element.getAttribute('aria-label')
+        if (ariaLabel) {
+            return ariaLabel.trim()
+        }
+
+        const tag = element.tagName.toLowerCase()
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+            const input = element as HTMLInputElement
+            if (input.labels && input.labels.length > 0) {
+                const labelText = input.labels[0].textContent?.trim()
+                if (labelText) {
+                    return labelText
+                }
+            }
+        }
+
+        const alt = element.getAttribute('alt')
+        if (alt) {
+            return alt.trim()
+        }
+
+        const title = element.getAttribute('title')
+        if (title) {
+            return title.trim()
+        }
+
+        const placeholder = element.getAttribute('placeholder')
+        if (placeholder) {
+            return placeholder.trim()
+        }
+
+        if (tag === 'button' || tag === 'a' || tag === 'label') {
+            const text = element.textContent?.trim()
+            if (text) {
+                return text
+            }
+        }
+
+        return undefined
+    }
+
     elements.forEach((element, index) => {
         const id = `e${index + 1}`
         element.setAttribute('data-viewprint-id', id)
@@ -26,7 +116,8 @@ export function extractSnapshotData(): RawSnapshotElement[] {
             : undefined
 
         const tag = element.tagName.toLowerCase()
-        const role = element.getAttribute('role') || undefined
+        const role = getRole(element)
+        const name = getAccessibleName(element)
 
         const attributes: Record<string, string> = {}
         for (const attr of Array.from(element.attributes)) {
@@ -50,6 +141,7 @@ export function extractSnapshotData(): RawSnapshotElement[] {
             parentId,
             tag,
             role,
+            name,
             attributes,
             text,
             boundingBox
@@ -70,6 +162,96 @@ export function inspectElement(elementId: string): ElementNode | null {
 
         const normalized = texts.join('').trim().replace(/\s+/g, ' ')
         return normalized ? normalized : undefined
+    }
+
+    function getRole(element: Element): string | undefined {
+        const explicit = element.getAttribute('role')
+        if (explicit) {
+            return explicit
+        }
+
+        const tag = element.tagName.toLowerCase()
+        const roleMap: Record<string, string> = {
+            a: 'link',
+            button: 'button',
+            h1: 'heading',
+            h2: 'heading',
+            h3: 'heading',
+            h4: 'heading',
+            h5: 'heading',
+            h6: 'heading',
+            img: 'img',
+            input: 'textbox',
+            nav: 'navigation',
+            main: 'main',
+            header: 'banner',
+            footer: 'contentinfo',
+            aside: 'complementary',
+            section: 'region',
+            article: 'article',
+            form: 'form',
+            table: 'table',
+            ul: 'list',
+            ol: 'list',
+            li: 'listitem',
+            select: 'combobox',
+            textarea: 'textbox'
+        }
+
+        return roleMap[tag]
+    }
+
+    function getAccessibleName(element: Element): string | undefined {
+        const labelledBy = element.getAttribute('aria-labelledby')
+        if (labelledBy) {
+            const name = labelledBy.split(/\s+/)
+                .map((id) => document.getElementById(id)?.textContent || '')
+                .join(' ')
+                .trim()
+            if (name) {
+                return name
+            }
+        }
+
+        const ariaLabel = element.getAttribute('aria-label')
+        if (ariaLabel) {
+            return ariaLabel.trim()
+        }
+
+        const tag = element.tagName.toLowerCase()
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+            const input = element as HTMLInputElement
+            if (input.labels && input.labels.length > 0) {
+                const labelText = input.labels[0].textContent?.trim()
+                if (labelText) {
+                    return labelText
+                }
+            }
+        }
+
+        const alt = element.getAttribute('alt')
+        if (alt) {
+            return alt.trim()
+        }
+
+        const title = element.getAttribute('title')
+        if (title) {
+            return title.trim()
+        }
+
+        const placeholder = element.getAttribute('placeholder')
+        if (placeholder) {
+            return placeholder.trim()
+        }
+
+        if (tag === 'button' || tag === 'a' || tag === 'label') {
+            const text = element.textContent?.trim()
+            if (text) {
+                return text
+            }
+        }
+
+        return undefined
     }
 
     function getMatchingRules(element: Element): { selector: string; sheet: string; rule: CSSStyleRule }[] {
@@ -349,7 +531,8 @@ export function inspectElement(elementId: string): ElementNode | null {
     }
 
     const tag = element.tagName.toLowerCase()
-    const role = element.getAttribute('role') || undefined
+    const role = getRole(element)
+    const name = getAccessibleName(element)
 
     const attributes: Record<string, string> = {}
     for (const attr of Array.from(element.attributes)) {
@@ -382,6 +565,7 @@ export function inspectElement(elementId: string): ElementNode | null {
         id: elementId,
         tag,
         role,
+        name,
         attributes,
         text,
         boundingBox,

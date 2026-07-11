@@ -18,6 +18,7 @@ export interface ElementNodeBase {
     parentId?: string
     tag: string
     role?: string
+    name?: string
     attributes: Record<string, string>
     text?: string
     boundingBox: BoundingBox
@@ -55,11 +56,46 @@ export interface Graph {
     nodes: Record<string, SnapshotElementNode>
 }
 
+export interface SnapshotNode {
+    ref: string
+    tag: string
+    role?: string
+    name?: string
+    text?: string
+    boundingBox: BoundingBox
+    children: SnapshotNode[]
+}
+
+export interface Snapshot {
+    url: string
+    viewport: { width: number; height: number }
+    tree: SnapshotNode[]
+}
+
 export interface SessionState {
     name: string
     url?: string
-    cookies: unknown[]
+    cookies: Array<{ name: string; value: string; domain: string; path: string; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: 'Strict' | 'Lax' | 'None' }>
     localStorage: Record<string, string>
+    sessionStorage: Record<string, string>
+}
+
+export interface NetworkRequest {
+    url: string
+    method: string
+    headers: Record<string, string>
+    timestamp: number
+    status?: number
+    responseHeaders?: Record<string, string>
+    responseBody?: string
+}
+
+export interface NetworkRoute {
+    url?: string
+    abort?: boolean
+    status?: number
+    body?: string
+    contentType?: string
 }
 
 export interface RawElementData {
@@ -83,6 +119,7 @@ export interface RawSnapshotElement {
     parentId?: string
     tag: string
     role?: string
+    name?: string
     attributes: Record<string, string>
     text?: string
     boundingBox: BoundingBox

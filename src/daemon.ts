@@ -1,6 +1,8 @@
 import http from 'node:http'
 import { URL } from 'node:url'
 import { BrowserSession } from './browser.js'
+import type { WaitCondition } from './browser.js'
+import type { NetworkRoute } from './types.js'
 
 export interface DaemonOptions {
     port: number
@@ -74,12 +76,22 @@ export class ViewPrintDaemon {
 
             const sessionName = pathParts[1]
             const action = pathParts[2]
+            const subAction = pathParts[3]
+            const subAction2 = pathParts[4]
 
             if (req.method === 'POST' && action === 'capture') {
                 const body = await this.readJson(req)
                 const session = await this.getOrCreateSession(sessionName)
                 const graph = await session.capture(body.url, body.viewport)
                 this.sendJson(res, 200, graph)
+                return
+            }
+
+            if (req.method === 'POST' && action === 'snapshot') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                const snapshot = await session.snapshot(body.url, body.viewport)
+                this.sendJson(res, 200, snapshot)
                 return
             }
 
@@ -96,6 +108,308 @@ export class ViewPrintDaemon {
                 const session = await this.getOrCreateSession(sessionName)
                 await session.click(body.elementId)
                 this.sendJson(res, 200, { clicked: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'fill') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.fill(body.elementId, body.text)
+                this.sendJson(res, 200, { filled: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'type') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.type(body.elementId, body.text)
+                this.sendJson(res, 200, { typed: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'hover') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.hover(body.elementId)
+                this.sendJson(res, 200, { hovered: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'focus') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.focus(body.elementId)
+                this.sendJson(res, 200, { focused: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'press') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.press(body.key)
+                this.sendJson(res, 200, { pressed: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'scroll') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.scroll(body.direction, body.px, body.elementId)
+                this.sendJson(res, 200, { scrolled: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'scrollintoview') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.scrollIntoView(body.elementId)
+                this.sendJson(res, 200, { scrolledIntoView: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'wait') {
+                const body = await this.readJson(req) as WaitCondition
+                const session = await this.getOrCreateSession(sessionName)
+                await session.wait(body)
+                this.sendJson(res, 200, { waited: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'eval') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                const result = await session.eval(body.script)
+                this.sendJson(res, 200, { result })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'batch') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                const results = await this.executeBatch(session, body.commands)
+                this.sendJson(res, 200, { results })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'network' && subAction === 'requests') {
+                const session = this.getExistingSession(sessionName)
+                this.sendJson(res, 200, { requests: session.getNetworkRequests() })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'network' && subAction === 'track' && subAction2 === 'start') {
+                const session = await this.getOrCreateSession(sessionName)
+                await session.startNetworkTracking()
+                this.sendJson(res, 200, { tracking: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'network' && subAction === 'track' && subAction2 === 'stop') {
+                const session = this.getExistingSession(sessionName)
+                await session.stopNetworkTracking()
+                this.sendJson(res, 200, { tracking: false })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'network' && subAction === 'har' && subAction2 === 'start') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                const result = await session.startHar(body.path)
+                this.sendJson(res, 200, result)
+                return
+            }
+
+            if (req.method === 'POST' && action === 'network' && subAction === 'har' && subAction2 === 'stop') {
+                const body = await this.readJson(req)
+                const session = this.getExistingSession(sessionName)
+                const result = await session.stopHar(body.path)
+                this.sendJson(res, 200, result)
+                return
+            }
+
+            if (req.method === 'POST' && action === 'network' && subAction === 'route') {
+                const body = await this.readJson(req) as NetworkRoute
+                if (!body.url) {
+                    this.sendJson(res, 400, { error: 'URL required for route' })
+                    return
+                }
+                const session = await this.getOrCreateSession(sessionName)
+                await session.route(body.url, body)
+                this.sendJson(res, 200, { routed: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'network' && subAction === 'unroute') {
+                const body = await this.readJson(req)
+                const session = this.getExistingSession(sessionName)
+                await session.unroute(body.url)
+                this.sendJson(res, 200, { unrouted: true })
+                return
+            }
+
+            if (req.method === 'GET' && action === 'cookies') {
+                const session = this.getExistingSession(sessionName)
+                const cookies = await session.getCookies()
+                this.sendJson(res, 200, { cookies })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'cookies' && subAction === 'set') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.setCookie(body.name, body.value, body.domain, body.path)
+                this.sendJson(res, 200, { set: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'cookies' && subAction === 'clear') {
+                const session = await this.getOrCreateSession(sessionName)
+                await session.clearCookies()
+                this.sendJson(res, 200, { cleared: true })
+                return
+            }
+
+            if (req.method === 'GET' && action === 'storage' && subAction === 'local') {
+                const session = this.getExistingSession(sessionName)
+                const data = await session.getLocalStorage()
+                this.sendJson(res, 200, { data })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'storage' && subAction === 'local' && subAction2 === 'set') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.setLocalStorage(body.key, body.value)
+                this.sendJson(res, 200, { set: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'storage' && subAction === 'local' && subAction2 === 'clear') {
+                const session = await this.getOrCreateSession(sessionName)
+                await session.clearLocalStorage()
+                this.sendJson(res, 200, { cleared: true })
+                return
+            }
+
+            if (req.method === 'GET' && action === 'storage' && subAction === 'session') {
+                const session = this.getExistingSession(sessionName)
+                const data = await session.getSessionStorage()
+                this.sendJson(res, 200, { data })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'storage' && subAction === 'session' && subAction2 === 'set') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.setSessionStorage(body.key, body.value)
+                this.sendJson(res, 200, { set: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'storage' && subAction === 'session' && subAction2 === 'clear') {
+                const session = await this.getOrCreateSession(sessionName)
+                await session.clearSessionStorage()
+                this.sendJson(res, 200, { cleared: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'tabs' && subAction === 'new') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                await session.newTab(body.url)
+                this.sendJson(res, 200, { tabCreated: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'tabs' && subAction === 'switch') {
+                const body = await this.readJson(req)
+                const session = this.getExistingSession(sessionName)
+                await session.switchTab(body.index)
+                this.sendJson(res, 200, { switched: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'tabs' && subAction === 'close') {
+                const body = await this.readJson(req)
+                const session = this.getExistingSession(sessionName)
+                await session.closeTab(body.index)
+                this.sendJson(res, 200, { closed: true })
+                return
+            }
+
+            if (req.method === 'GET' && action === 'tabs') {
+                const session = this.getExistingSession(sessionName)
+                const tabs = await session.listTabs()
+                this.sendJson(res, 200, { tabs })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'frames' && subAction === 'switch') {
+                const body = await this.readJson(req)
+                const session = this.getExistingSession(sessionName)
+                await session.switchFrame(body.selector)
+                this.sendJson(res, 200, { switched: true })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'frames' && subAction === 'main') {
+                const session = this.getExistingSession(sessionName)
+                await session.switchFrameMain()
+                this.sendJson(res, 200, { switched: true })
+                return
+            }
+
+            if (req.method === 'GET' && action === 'frames') {
+                const session = this.getExistingSession(sessionName)
+                const frames = await session.listFrames()
+                this.sendJson(res, 200, { frames })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'screenshot' && subAction === 'page') {
+                const body = await this.readJson(req)
+                const session = this.getExistingSession(sessionName)
+                const outputPath = await session.screenshotPage(body.path)
+                this.sendJson(res, 200, { path: outputPath })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'screenshot' && subAction === 'element') {
+                const body = await this.readJson(req)
+                const session = this.getExistingSession(sessionName)
+                const outputPath = await session.screenshotElement(body.elementId, body.path)
+                this.sendJson(res, 200, { path: outputPath })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'read') {
+                const body = await this.readJson(req)
+                const session = this.getExistingSession(sessionName)
+                const content = await session.read(body.format ?? 'text')
+                this.sendJson(res, 200, { content })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'dialog') {
+                const body = await this.readJson(req)
+                const session = this.getExistingSession(sessionName)
+                await session.setDialogHandler(async () => {
+                    return body.handler as { accept: boolean; promptText?: string }
+                })
+                this.sendJson(res, 200, { handlerSet: true })
+                return
+            }
+
+            if (req.method === 'GET' && action === 'diff' && subAction === 'last') {
+                const session = this.getExistingSession(sessionName)
+                const currentGraph = await session.capture()
+                const lastGraph = session.getLastGraph()
+                if (!lastGraph) {
+                    this.sendJson(res, 200, { diff: null, message: 'No previous graph to compare' })
+                    return
+                }
+                const { diffGraphs } = await import('./diff.js')
+                this.sendJson(res, 200, { diff: diffGraphs(lastGraph, currentGraph) })
                 return
             }
 
@@ -137,6 +451,78 @@ export class ViewPrintDaemon {
         await session.start()
         this.sessions.set(name, session)
         return session
+    }
+
+    private getExistingSession(name: string): BrowserSession {
+        const session = this.sessions.get(name)
+        if (!session) {
+            throw new Error('Session not found')
+        }
+        return session
+    }
+
+    private async executeBatch(session: BrowserSession, commands: unknown[]): Promise<unknown[]> {
+        const results: unknown[] = []
+
+        for (const command of commands) {
+            if (!Array.isArray(command)) {
+                throw new Error('Each batch command must be an array')
+            }
+
+            const [name, ...args] = command
+            const result = await this.executeCommand(session, name as string, args)
+            results.push(result)
+        }
+
+        return results
+    }
+
+    private async executeCommand(session: BrowserSession, name: string, args: unknown[]): Promise<unknown> {
+        switch (name) {
+            case 'capture':
+                return session.capture(args[0] as string | undefined, args[1] as { width: number; height: number } | undefined)
+            case 'snapshot':
+                return session.snapshot(args[0] as string | undefined, args[1] as { width: number; height: number } | undefined)
+            case 'inspect':
+                return session.inspect(args[0] as string)
+            case 'click':
+                await session.click(args[0] as string)
+                return { clicked: true }
+            case 'fill':
+                await session.fill(args[0] as string, args[1] as string)
+                return { filled: true }
+            case 'type':
+                await session.type(args[0] as string, args[1] as string)
+                return { typed: true }
+            case 'hover':
+                await session.hover(args[0] as string)
+                return { hovered: true }
+            case 'focus':
+                await session.focus(args[0] as string)
+                return { focused: true }
+            case 'press':
+                await session.press(args[0] as string)
+                return { pressed: true }
+            case 'scroll':
+                await session.scroll(
+                    args[0] as 'up' | 'down' | 'left' | 'right',
+                    args[1] as number,
+                    args[2] as string | undefined
+                )
+                return { scrolled: true }
+            case 'scrollintoview':
+                await session.scrollIntoView(args[0] as string)
+                return { scrolledIntoView: true }
+            case 'wait':
+                await session.wait(args[0] as WaitCondition)
+                return { waited: true }
+            case 'eval':
+                return { result: await session.eval(args[0] as string) }
+            case 'status':
+                return session.status()
+            default:
+                throw new Error(`Unknown command: ${name}`)
+        }
     }
 
     private readJson(req: http.IncomingMessage): Promise<Record<string, any>> {
