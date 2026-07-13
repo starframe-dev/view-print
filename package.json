@@ -1,11 +1,14 @@
 {
-    "name": "viewprint",
+    "name": "@starframe/view-print",
     "version": "0.1.0",
     "description": "AI tool for extracting precise layout graphs from web pages via Playwright",
     "type": "module",
     "main": "./dist/index.js",
     "bin": {
         "viewprint": "./dist/src/cli.js"
+    },
+    "publishConfig": {
+        "access": "public"
     },
     "scripts": {
         "build": "tsc",
@@ -21,8 +24,16 @@
         "ai",
         "cli"
     ],
-    "author": "",
+    "author": "Starframe",
     "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/starframe-dev/view-print.git"
+    },
+    "bugs": {
+        "url": "https://github.com/starframe-dev/view-print/issues"
+    },
+    "homepage": "https://github.com/starframe-dev/view-print#readme",
     "dependencies": {
         "commander": "^12.1.0",
         "playwright": "^1.45.0"

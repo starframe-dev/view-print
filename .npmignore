@@ -1,0 +1,15 @@
+dist/tests/
+tests/
+*.test.js
+*.test.d.ts
+*.test.js.map
+*.test.d.ts.map
+
+# Config files
+vitest.config.ts
+tsconfig.json
+pnpm-workspace.yaml
+.gitignore
+
+# Source maps for tests
+*.tsbuildinfo
