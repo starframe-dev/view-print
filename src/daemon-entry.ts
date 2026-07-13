@@ -7,14 +7,20 @@ const port = portArg ? parseInt(portArg.slice('--port='.length), 10) : parseInt(
 async function main(): Promise<void> {
     const daemon = await startDaemon({ port })
 
-    process.on('SIGTERM', async () => {
+    const cleanup = async (exitCode: number): Promise<void> => {
         await daemon.stop()
-        process.exit(0)
-    })
+        process.exit(exitCode)
+    }
 
-    process.on('SIGINT', async () => {
-        await daemon.stop()
-        process.exit(0)
+    process.on('SIGTERM', () => { void cleanup(0) })
+    process.on('SIGINT', () => { void cleanup(0) })
+    process.on('uncaughtException', (error) => {
+        console.error('Uncaught exception:', error)
+        void cleanup(1)
+    })
+    process.on('unhandledRejection', (reason) => {
+        console.error('Unhandled rejection:', reason)
+        void cleanup(1)
     })
 }
 

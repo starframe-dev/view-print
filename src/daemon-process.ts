@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, execSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -64,6 +64,23 @@ export async function ensureDaemonRunning(port = getDaemonPort()): Promise<void>
 export async function startDaemonProcess(port: number): Promise<void> {
     fs.mkdirSync(path.dirname(pidFilePath), { recursive: true })
 
+    // Kill existing daemon process if alive
+    if (fs.existsSync(pidFilePath)) {
+        const oldPid = parseInt(fs.readFileSync(pidFilePath, 'utf-8').trim(), 10)
+        if (!isNaN(oldPid) && isProcessAlive(oldPid)) {
+            killProcessTree(oldPid)
+            // Wait for process to die
+            for (let i = 0; i < 20; i++) {
+                if (!isProcessAlive(oldPid)) break
+                await delay(100)
+            }
+            // Force kill if still alive
+            if (isProcessAlive(oldPid)) {
+                try { process.kill(oldPid, 'SIGKILL') } catch { /* ignore */ }
+            }
+        }
+    }
+
     const logPath = path.join(path.dirname(pidFilePath), 'daemon.log')
     const out = fs.openSync(logPath, 'a')
     const err = fs.openSync(logPath, 'a')
@@ -95,6 +112,7 @@ function delay(ms: number): Promise<void> {
 }
 
 export async function stopDaemonProcess(port = getDaemonPort()): Promise<void> {
+    // Try graceful shutdown via HTTP
     try {
         await fetch(`http://localhost:${port}/shutdown`, { method: 'POST' })
     } catch {
@@ -103,13 +121,43 @@ export async function stopDaemonProcess(port = getDaemonPort()): Promise<void> {
 
     if (fs.existsSync(pidFilePath)) {
         const pid = parseInt(fs.readFileSync(pidFilePath, 'utf-8').trim(), 10)
-        if (isProcessAlive(pid)) {
-            try {
-                process.kill(pid, 'SIGTERM')
-            } catch {
-                // ignore
+        if (!isNaN(pid) && isProcessAlive(pid)) {
+            killProcessTree(pid)
+            // Wait for process to die
+            for (let i = 0; i < 20; i++) {
+                if (!isProcessAlive(pid)) break
+                await delay(100)
+            }
+            // Force kill if still alive
+            if (isProcessAlive(pid)) {
+                try { process.kill(pid, 'SIGKILL') } catch { /* ignore */ }
             }
         }
         fs.rmSync(pidFilePath)
+    }
+}
+
+function killProcessTree(pid: number): void {
+    // Kill children first
+    const children = getChildPids(pid)
+    for (const childPid of children) {
+        try { process.kill(childPid, 'SIGTERM') } catch { /* ignore */ }
+    }
+    // Kill parent
+    try { process.kill(pid, 'SIGTERM') } catch { /* ignore */ }
+}
+
+function getChildPids(pid: number): number[] {
+    try {
+        const output = execSync(`ps -o pid= --ppid ${pid}`, {
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'ignore'],
+            timeout: 2000
+        })
+        return output.trim().split('\n')
+            .map((line) => parseInt(line.trim(), 10))
+            .filter((p) => !isNaN(p))
+    } catch {
+        return []
     }
 }
