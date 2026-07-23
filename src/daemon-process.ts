@@ -1,10 +1,16 @@
-import { spawn, execSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { DaemonClient } from './daemon-client.js'
+import { isProcessAlive, killProcessTree } from './process-tree.js'
 
 const pidFilePath = path.join(os.homedir(), '.viewprint', 'daemon.pid')
+
+export interface StartDaemonOptions {
+    port: number
+    idleTimeoutMs?: number
+}
 
 export function getDaemonPort(): number {
     const envPort = process.env.VIEWPRINT_PORT
@@ -16,6 +22,18 @@ export function getDaemonPort(): number {
 
 export function getPidFilePath(): string {
     return pidFilePath
+}
+
+export function getIdleTimeoutFromEnv(): number | undefined {
+    const env = process.env.VIEWPRINT_IDLE_TIMEOUT_MS
+    if (env === undefined) {
+        return undefined
+    }
+    const value = parseInt(env, 10)
+    if (isNaN(value)) {
+        return undefined
+    }
+    return value
 }
 
 export async function isDaemonRunning(port = getDaemonPort()): Promise<boolean> {
@@ -33,13 +51,18 @@ export async function isDaemonRunning(port = getDaemonPort()): Promise<boolean> 
     return isProcessAlive(pid)
 }
 
-function isProcessAlive(pid: number): boolean {
-    try {
-        process.kill(pid, 0)
-        return true
-    } catch {
-        return false
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+    for (let i = 0; i < Math.ceil(timeoutMs / 100); i++) {
+        if (!isProcessAlive(pid)) {
+            return true
+        }
+        await delay(100)
     }
+    return !isProcessAlive(pid)
 }
 
 export async function ensureDaemonRunning(port = getDaemonPort()): Promise<void> {
@@ -47,9 +70,8 @@ export async function ensureDaemonRunning(port = getDaemonPort()): Promise<void>
         return
     }
 
-    await startDaemonProcess(port)
+    await startDaemonProcess({ port })
 
-    // Wait for daemon to be ready
     const client = new DaemonClient({ port })
     for (let i = 0; i < 50; i++) {
         if (await client.health()) {
@@ -61,7 +83,10 @@ export async function ensureDaemonRunning(port = getDaemonPort()): Promise<void>
     throw new Error('Daemon failed to start')
 }
 
-export async function startDaemonProcess(port: number): Promise<void> {
+export async function startDaemonProcess(options: number | StartDaemonOptions): Promise<void> {
+    const opts: StartDaemonOptions = typeof options === 'number' ? { port: options } : options
+    const { port, idleTimeoutMs } = opts
+
     fs.mkdirSync(path.dirname(pidFilePath), { recursive: true })
 
     // Kill existing daemon process if alive
@@ -69,14 +94,8 @@ export async function startDaemonProcess(port: number): Promise<void> {
         const oldPid = parseInt(fs.readFileSync(pidFilePath, 'utf-8').trim(), 10)
         if (!isNaN(oldPid) && isProcessAlive(oldPid)) {
             killProcessTree(oldPid)
-            // Wait for process to die
-            for (let i = 0; i < 20; i++) {
-                if (!isProcessAlive(oldPid)) break
-                await delay(100)
-            }
-            // Force kill if still alive
-            if (isProcessAlive(oldPid)) {
-                try { process.kill(oldPid, 'SIGKILL') } catch { /* ignore */ }
+            if (!(await waitForExit(oldPid, 2000))) {
+                killProcessTree(oldPid, 'SIGKILL')
             }
         }
     }
@@ -85,8 +104,13 @@ export async function startDaemonProcess(port: number): Promise<void> {
     const out = fs.openSync(logPath, 'a')
     const err = fs.openSync(logPath, 'a')
 
+    const entryArgs = [`--port=${port}`]
+    if (idleTimeoutMs !== undefined) {
+        entryArgs.push(`--idle-timeout=${idleTimeoutMs}`)
+    }
+
     const entryScript = path.resolve(path.dirname(process.argv[1]), 'daemon-entry.js')
-    const child = spawn(process.execPath, [entryScript, `--port=${port}`], {
+    const child = spawn(process.execPath, [entryScript, ...entryArgs], {
         detached: true,
         stdio: ['ignore', out, err]
     })
@@ -95,7 +119,6 @@ export async function startDaemonProcess(port: number): Promise<void> {
 
     fs.writeFileSync(pidFilePath, String(child.pid))
 
-    // Wait briefly for daemon to be ready
     const client = new DaemonClient({ port })
     for (let i = 0; i < 50; i++) {
         if (await client.health()) {
@@ -107,57 +130,28 @@ export async function startDaemonProcess(port: number): Promise<void> {
     throw new Error('Daemon failed to start')
 }
 
-function delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 export async function stopDaemonProcess(port = getDaemonPort()): Promise<void> {
     // Try graceful shutdown via HTTP
     try {
         await fetch(`http://localhost:${port}/shutdown`, { method: 'POST' })
     } catch {
-        // Daemon may not support shutdown
+        // Daemon may not support shutdown or may have already exited
     }
 
+    // Give daemon up to 2 seconds to exit gracefully
     if (fs.existsSync(pidFilePath)) {
         const pid = parseInt(fs.readFileSync(pidFilePath, 'utf-8').trim(), 10)
         if (!isNaN(pid) && isProcessAlive(pid)) {
-            killProcessTree(pid)
-            // Wait for process to die
-            for (let i = 0; i < 20; i++) {
-                if (!isProcessAlive(pid)) break
-                await delay(100)
+            if (await waitForExit(pid, 2000)) {
+                fs.rmSync(pidFilePath)
+                return
             }
-            // Force kill if still alive
-            if (isProcessAlive(pid)) {
-                try { process.kill(pid, 'SIGKILL') } catch { /* ignore */ }
-            }
+            // Force kill tree if still alive
+            killProcessTree(pid, 'SIGKILL')
+            await waitForExit(pid, 2000)
         }
-        fs.rmSync(pidFilePath)
-    }
-}
-
-function killProcessTree(pid: number): void {
-    // Kill children first
-    const children = getChildPids(pid)
-    for (const childPid of children) {
-        try { process.kill(childPid, 'SIGTERM') } catch { /* ignore */ }
-    }
-    // Kill parent
-    try { process.kill(pid, 'SIGTERM') } catch { /* ignore */ }
-}
-
-function getChildPids(pid: number): number[] {
-    try {
-        const output = execSync(`ps -o pid= --ppid ${pid}`, {
-            encoding: 'utf-8',
-            stdio: ['pipe', 'pipe', 'ignore'],
-            timeout: 2000
-        })
-        return output.trim().split('\n')
-            .map((line) => parseInt(line.trim(), 10))
-            .filter((p) => !isNaN(p))
-    } catch {
-        return []
+        if (fs.existsSync(pidFilePath)) {
+            fs.rmSync(pidFilePath)
+        }
     }
 }

@@ -6,23 +6,52 @@ import type { NetworkRoute } from './types.js'
 
 export interface DaemonOptions {
     port: number
+    /**
+     * Auto-shutdown the daemon after this many ms without any request.
+     * Default: 600000 (10 minutes). Set to 0 or negative to disable.
+     */
+    idleTimeoutMs?: number
 }
+
+const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000
+const DEFAULT_IDLE_CHECK_INTERVAL_MS = 30 * 1000
+const STOP_TIMEOUT_MS = 5000
 
 export class ViewPrintDaemon {
     private server: http.Server | null = null
     private sessions = new Map<string, BrowserSession>()
     private port: number
+    private idleTimeoutMs: number
+    private idleCheckIntervalMs: number
+    private lastActivityAt = Date.now()
+    private idleCheckInterval: NodeJS.Timeout | null = null
+    private stopping = false
 
     constructor(options: DaemonOptions) {
         this.port = options.port
+        const requested = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+        this.idleTimeoutMs = requested > 0 ? requested : 0
+        const envInterval = process.env.VIEWPRINT_IDLE_CHECK_INTERVAL_MS
+        this.idleCheckIntervalMs = envInterval
+            ? Math.max(100, parseInt(envInterval, 10))
+            : DEFAULT_IDLE_CHECK_INTERVAL_MS
     }
 
     async start(): Promise<void> {
+        this.lastActivityAt = Date.now()
         this.server = http.createServer((req, res) => this.handleRequest(req, res))
+
+        if (this.idleTimeoutMs > 0) {
+            this.idleCheckInterval = setInterval(() => this.checkIdle(), this.idleCheckIntervalMs)
+            this.idleCheckInterval.unref()
+        }
 
         return new Promise((resolve, reject) => {
             this.server?.listen(this.port, () => {
                 console.error(`viewprint daemon listening on port ${this.port}`)
+                if (this.idleTimeoutMs > 0) {
+                    console.error(`viewprint daemon idle timeout: ${this.idleTimeoutMs}ms`)
+                }
                 resolve()
             })
 
@@ -31,16 +60,66 @@ export class ViewPrintDaemon {
     }
 
     async stop(): Promise<void> {
-        for (const session of this.sessions.values()) {
-            await session.close()
+        if (this.stopping) {
+            return
         }
-        this.sessions.clear()
+        this.stopping = true
 
-        if (this.server) {
-            return new Promise((resolve) => {
-                this.server?.close(() => resolve())
+        if (this.idleCheckInterval) {
+            clearInterval(this.idleCheckInterval)
+            this.idleCheckInterval = null
+        }
+
+        const stopPromise = (async () => {
+            const sessionCloses = Array.from(this.sessions.values()).map((session) =>
+                session.close().catch((error) => {
+                    console.error('Session close error:', error)
+                })
+            )
+            await Promise.allSettled(sessionCloses)
+            this.sessions.clear()
+
+            if (this.server) {
+                await new Promise<void>((resolve) => {
+                    this.server!.close(() => resolve())
+                })
+            }
+        })()
+
+        const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, STOP_TIMEOUT_MS))
+        await Promise.race([stopPromise, timeoutPromise])
+    }
+
+    /**
+     * Returns true if idle timeout is enabled and configured.
+     */
+    isIdleTimeoutEnabled(): boolean {
+        return this.idleTimeoutMs > 0
+    }
+
+    /**
+     * Returns the last activity timestamp (ms epoch). Useful for tests.
+     */
+    getLastActivityAt(): number {
+        return this.lastActivityAt
+    }
+
+    private checkIdle(): void {
+        if (this.stopping || this.idleTimeoutMs <= 0) {
+            return
+        }
+        const idleFor = Date.now() - this.lastActivityAt
+        if (idleFor >= this.idleTimeoutMs) {
+            console.error(`viewprint daemon idle for ${idleFor}ms, shutting down`)
+            // Use setImmediate to break out of the interval callback
+            setImmediate(() => {
+                void this.stop().finally(() => process.exit(0))
             })
         }
+    }
+
+    private markActivity(): void {
+        this.lastActivityAt = Date.now()
     }
 
     getPort(): number {
@@ -57,6 +136,8 @@ export class ViewPrintDaemon {
         const url = new URL(req.url || '/', `http://localhost:${this.port}`)
         const pathParts = url.pathname.split('/').filter(Boolean)
 
+        this.markActivity()
+
         try {
             if (req.method === 'GET' && url.pathname === '/health') {
                 this.sendJson(res, 200, { ok: true })
@@ -65,7 +146,10 @@ export class ViewPrintDaemon {
 
             if (req.method === 'POST' && url.pathname === '/shutdown') {
                 this.sendJson(res, 200, { shuttingDown: true })
-                await this.stop()
+                // Exit after response is flushed; daemon.stop() closes sessions
+                setImmediate(() => {
+                    void this.stop().finally(() => process.exit(0))
+                })
                 return
             }
 

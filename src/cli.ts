@@ -4,6 +4,7 @@ import { createDaemonClient } from './daemon-client.js'
 import {
     ensureDaemonRunning,
     getDaemonPort,
+    getIdleTimeoutFromEnv,
     isDaemonRunning,
     startDaemonProcess,
     stopDaemonProcess
@@ -557,14 +558,18 @@ daemon
     .command('start')
     .description('Start viewprint daemon')
     .option('--port <number>', 'Daemon port', `${getDaemonPort()}`)
-    .action(async (options: { port: string }) => {
+    .option('--idle-timeout <ms>', 'Auto-shutdown after N ms of inactivity (0 to disable)')
+    .action(async (options: { port: string; idleTimeout?: string }) => {
         const port = parseInt(options.port, 10)
+        const idleTimeoutMs = options.idleTimeout !== undefined
+            ? parseInt(options.idleTimeout, 10)
+            : getIdleTimeoutFromEnv()
         if (await isDaemonRunning(port)) {
-            console.log(JSON.stringify({ port, running: true }, null, 2))
+            console.log(JSON.stringify({ port, running: true, idleTimeoutMs: idleTimeoutMs ?? null }, null, 2))
             return
         }
-        await startDaemonProcess(port)
-        console.log(JSON.stringify({ port, started: true }, null, 2))
+        await startDaemonProcess({ port, idleTimeoutMs })
+        console.log(JSON.stringify({ port, started: true, idleTimeoutMs: idleTimeoutMs ?? null }, null, 2))
     })
 
 daemon

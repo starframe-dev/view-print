@@ -1,9 +1,10 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { chromium, type Browser, type BrowserContext, type BrowserContextOptions, type Cookie, type Page, type Request, type Response } from 'playwright'
+import { chromium, type Browser, type BrowserContext, type BrowserContextOptions, type BrowserServer, type Cookie, type Page, type Request, type Response } from 'playwright'
 import { extractSnapshotData, inspectElement } from './extractor.js'
 import { buildGraph } from './graph.js'
+import { killProcessTree } from './process-tree.js'
 import { loadSession, saveSession } from './session.js'
 import type { ElementNode, Graph, NetworkRequest, NetworkRoute, SessionState, Snapshot, SnapshotElementNode, SnapshotNode } from './types.js'
 
@@ -17,6 +18,7 @@ export interface WaitCondition {
 
 export class BrowserSession {
     private name: string
+    private server: BrowserServer | null = null
     private browser: Browser | null = null
     private context: BrowserContext | null = null
     private page: Page | null = null
@@ -25,6 +27,8 @@ export class BrowserSession {
     private requestHandler?: (request: Request) => void
     private responseHandler?: (response: Response) => void
     private harPath?: string
+    private browserPid: number | null = null
+    private closing = false
 
     constructor(name: string) {
         this.name = name
@@ -32,7 +36,11 @@ export class BrowserSession {
     }
 
     async start(): Promise<void> {
-        this.browser = await chromium.launch({ headless: true })
+        // Use launchServer + connect so we have access to the browser process PID.
+        // This is required to guarantee chromium cleanup on daemon exit.
+        this.server = await chromium.launchServer({ headless: true })
+        this.browserPid = this.server.process().pid ?? null
+        this.browser = await chromium.connect(this.server.wsEndpoint())
         this.context = await this.browser.newContext({ storageState: this.buildStorageState() })
         this.page = await this.context.newPage()
     }
@@ -434,12 +442,57 @@ export class BrowserSession {
     }
 
     async close(): Promise<void> {
-        await this.persistState()
-        await this.context?.close()
-        await this.browser?.close()
+        if (this.closing) {
+            return
+        }
+        this.closing = true
+
+        // Best-effort state persistence (don't block cleanup on failure)
+        try {
+            await this.persistState()
+        } catch (error) {
+            console.error('persistState error during close:', error)
+        }
+
+        // Try graceful Playwright close with a short timeout
+        const gracefulClose = (async () => {
+            try {
+                await this.context?.close()
+            } catch (error) {
+                console.error('context.close error:', error)
+            }
+            try {
+                await this.browser?.close()
+            } catch (error) {
+                console.error('browser.close error:', error)
+            }
+            try {
+                await this.server?.close()
+            } catch (error) {
+                console.error('server.close error:', error)
+            }
+        })()
+
+        const timeout = new Promise<void>((resolve) => setTimeout(resolve, 2000))
+        await Promise.race([gracefulClose, timeout])
+
+        // If browser process is still alive, kill its process tree as fallback
+        if (this.browserPid !== null) {
+            const { isProcessAlive } = await import('./process-tree.js')
+            if (isProcessAlive(this.browserPid)) {
+                killProcessTree(this.browserPid)
+                await new Promise<void>((resolve) => setTimeout(resolve, 500))
+                if (isProcessAlive(this.browserPid)) {
+                    killProcessTree(this.browserPid, 'SIGKILL')
+                }
+            }
+        }
+
         this.context = null
         this.browser = null
+        this.server = null
         this.page = null
+        this.browserPid = null
     }
 
     getState(): SessionState {

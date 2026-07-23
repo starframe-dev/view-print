@@ -8,6 +8,7 @@ export { runMcpServer } from './mcp.js'
 export {
     ensureDaemonRunning,
     getDaemonPort,
+    getIdleTimeoutFromEnv,
     isDaemonRunning,
     startDaemonProcess,
     stopDaemonProcess
