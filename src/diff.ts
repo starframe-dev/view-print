@@ -1,4 +1,4 @@
-import type { Graph } from './types.js'
+import type { CaptureNode, Graph } from './types.js'
 
 export interface GraphDiff {
     added: string[]
@@ -11,12 +11,14 @@ export interface GraphDiff {
 }
 
 export function diffGraphs(before: Graph, after: Graph): GraphDiff {
+    const beforeMap = flattenTree(before.tree)
+    const afterMap = flattenTree(after.tree)
     const added: string[] = []
     const removed: string[] = []
     const changed: GraphDiff['changed'] = []
 
-    for (const [id, afterNode] of Object.entries(after.nodes)) {
-        const beforeNode = before.nodes[id]
+    for (const [id, afterNode] of Object.entries(afterMap)) {
+        const beforeNode = beforeMap[id]
         if (!beforeNode) {
             added.push(id)
             continue
@@ -42,11 +44,28 @@ export function diffGraphs(before: Graph, after: Graph): GraphDiff {
         }
     }
 
-    for (const id of Object.keys(before.nodes)) {
-        if (!after.nodes[id]) {
+    for (const id of Object.keys(beforeMap)) {
+        if (!afterMap[id]) {
             removed.push(id)
         }
     }
 
     return { added, removed, changed }
+}
+
+function flattenTree(tree: CaptureNode[]): Record<string, CaptureNode> {
+    const result: Record<string, CaptureNode> = {}
+
+    function walk(node: CaptureNode): void {
+        result[node.id] = node
+        for (const child of node.children) {
+            walk(child)
+        }
+    }
+
+    for (const root of tree) {
+        walk(root)
+    }
+
+    return result
 }

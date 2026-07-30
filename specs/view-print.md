@@ -65,7 +65,7 @@ document.querySelectorAll('body, body *')
 
 ### 3. Snapshot — accessibility tree с refs
 
-`Snapshot` возвращает иерархическое accessibility-дерево элементов внутри `<body>`. Каждый узел содержит `ref` (например, `e2`), который можно использовать в `click @e2` и `inspect @e2`.
+`Snapshot` возвращает иерархическое accessibility-дерево элементов внутри `<body>`. Каждый узел содержит `ref` (например, `e2`), который можно использовать в `click @e2` и `inspect @e2`. Параметр `depth` (default `1`) управляет раскрытием аналогично `capture`.
 
 ```json
 {
@@ -76,43 +76,66 @@ document.querySelectorAll('body, body *')
       "ref": "e1",
       "tag": "body",
       "boundingBox": { ... },
+      "childrenCount": 1,
       "children": [
-        { "ref": "e2", "tag": "button", "role": "button", "name": "Submit", "text": "Submit", "children": [] }
+        { "ref": "e2", "tag": "button", "role": "button", "name": "Submit", "text": "Submit", "childrenCount": 0, "children": [] }
       ]
     }
   ]
 }
 ```
 
-Узлы без `role`/`name`/`text`, но имеющие значимых потомков, поднимаются вверх; пустые контейнеры пропускаются.
+**Lift-логика** (на раскрытых уровнях): узлы без `role`/`name`/`text`, но имеющие значимых потомков, поднимаются вверх — их дети всплывают наверх. На свёрнутых уровнях (`level >= depth`) lift не применяется: пустой контейнер показывается как stub с `childrenCount` и `children: []`.
 
-### 3. Capture — облегчённый граф
+**С expand:** корни snapshot-дерева — это `graph.tree` после collapse, то есть указанные id. Логика lift работает как обычно внутри каждого поддерева.
 
-`capture` возвращает плоский JSON adjacency list с минимальными данными:
+### 3. Capture — облегчённое дерево
+
+`capture` возвращает иерархическое дерево с минимальными данными. Связи задаются через вложенные `children`. Свёрнутые ветки показывают `childrenCount` (число прямых потомков) и `children: []`. Глубина раскрытия управляется параметром `depth` (default `1`).
 
 ```json
 {
   "url": "https://example.com",
   "viewport": { "width": 1920, "height": 1080 },
-  "nodes": {
-    "e1": { "id": "e1", "tag": "body", "boundingBox": { ... }, "text": "..." },
-    "e2": { "id": "e2", "tag": "div", "boundingBox": { ... }, "text": "..." }
-  },
-  "edges": [
-    { "from": "e1", "to": "e2", "type": "child" }
+  "tree": [
+    {
+      "id": "e1",
+      "tag": "body",
+      "boundingBox": { ... },
+      "childrenCount": 2,
+      "children": [
+        { "id": "e2", "tag": "div", "role": "main", "boundingBox": { ... }, "childrenCount": 1, "children": [] },
+        { "id": "e3", "tag": "button", "role": "button", "name": "Submit", "text": "Submit", "boundingBox": { ... }, "childrenCount": 0, "children": [] }
+      ]
+    }
   ]
 }
 ```
 
 Каждый узел содержит:
 - `id` — stable ID;
+- `parentId` (опционально);
 - `tag`;
 - `role` (опционально);
+- `name` (опционально);
 - `attributes`;
 - `text` (опционально);
-- `boundingBox`.
+- `boundingBox`;
+- `childrenCount` — число прямых детей (всегда);
+- `children` — массив дочерних узлов; `[]` если свёрнуты (`level >= depth`).
 
 `computedStyles`, `cascade` и `pseudo` **не включаются** в `capture`.
+
+**Параметр depth:**
+- `depth = 1` (default): корень + его прямые дети. У каждого ребёнка `childrenCount` (число внуков), `children: []`.
+- `depth = N`: раскрыто N уровней от корня. На уровне N — `childrenCount` без раскрытия.
+- `depth = 9999` (или любое большое число): всё дерево раскрыто.
+
+**Параметр expand:**
+- `expand = []` (default): корень = body, обычная логика depth.
+- `expand = ['e3', 'e5']`: указанные id становятся корнями `tree`. **body не показывается.** depth отсчитывается от каждого root.
+- Неизвестные id тихо игнорируются. Если все id неизвестны — `tree = []`.
+- Id можно передавать с `@` или без (`@e3` = `e3`).
 
 ### 4. Inspect — полные данные элемента
 
@@ -145,20 +168,25 @@ CLI поддерживает флаг `--viewport`:
 
 ```bash
 viewprint -s test capture <url> --viewport 1920x1080
-viewprint -s test capture --viewport 375x812
+viewprint -s test capture <url> --depth 3 --viewport 375x812
+viewprint -s test capture <url> --expand e3,e5 --viewport 1920x1080
 ```
 
 Формат: `WIDTHxHEIGHT`. Если не указан, используется `1280x720`.
 
-Viewport передаётся в HTTP API:
+Viewport, depth и expand передаются в HTTP API:
 
 ```json
 POST /sessions/:name/capture
 {
   "url": "https://example.com",
-  "viewport": { "width": 1920, "height": 1080 }
+  "viewport": { "width": 1920, "height": 1080 },
+  "depth": 1,
+  "expand": ["e3", "e5"]
 }
 ```
+
+`depth` и `expand` опциональны, default `depth=1`, `expand=[]` на стороне демона.
 
 ### 6. Каскад CSS
 
@@ -191,8 +219,8 @@ CLI работает как клиент: проверяет демон, авт�
 
 | Метод | Путь | Тело | Ответ |
 |-------|------|------|-------|
-| POST | `/sessions/:name/capture` | `{ url?: string; viewport?: { width; height } }` | Snapshot `Graph` |
-| POST | `/sessions/:name/snapshot` | `{ url?: string; viewport?: { width; height } }` | Accessibility `Snapshot` tree |
+| POST | `/sessions/:name/capture` | `{ url?: string; viewport?: { width; height }; depth?: number; expand?: string[] }` | `Graph` (tree) |
+| POST | `/sessions/:name/snapshot` | `{ url?: string; viewport?: { width; height }; depth?: number; expand?: string[] }` | `Snapshot` (tree) |
 | POST | `/sessions/:name/inspect` | `{ elementId: string }` | Полный `ElementNode` |
 | POST | `/sessions/:name/click` | `{ elementId: string }` | `{ clicked: true }` |
 | GET | `/sessions/:name/status` | — | `{ url?: string; elementCount: number }` |
@@ -203,8 +231,8 @@ CLI работает как клиент: проверяет демон, авт�
 ### 10. CLI
 
 ```bash
-viewprint -s <session> capture [<url>] [--viewport WIDTHxHEIGHT]
-viewprint -s <session> snapshot [<url>] [--viewport WIDTHxHEIGHT]
+viewprint -s <session> capture [<url>] [--viewport WIDTHxHEIGHT] [--depth N] [--expand <ids>]
+viewprint -s <session> snapshot [<url>] [--viewport WIDTHxHEIGHT] [--depth N] [--expand <ids>]
 viewprint -s <session> inspect <elementId>
 viewprint -s <session> click <elementId>
 viewprint -s <session> status
@@ -312,11 +340,13 @@ Tools: `capture`, `snapshot`, `click`, `fill`, `inspect`, `eval`, `read`, `statu
 
 ## Критерии приёмки (обновлённые)
 
-- [x] `capture` возвращает облегчённый граф без `computedStyles`, `cascade` и `pseudo`.
+- [x] `capture` возвращает облегчённое дерево без `computedStyles`, `cascade` и `pseudo`.
+- [x] `capture` и `snapshot` принимают параметр `depth` (default `1`); свёрнутые ветки показывают `childrenCount` и `children: []`.
+- [x] `capture` и `snapshot` принимают параметр `expand: string[]` — список id, которые становятся корнями `tree` (вместо body). depth отсчитывается от каждого root. Неизвестные id тихо игнорируются.
 - [x] `inspect <elementId>` возвращает полные данные элемента со всеми CSS-данными и псевдо-элементами.
-- [x] `capture` с `--viewport 1920x1080` возвращает граф с указанным viewport.
+- [x] `capture` с `--viewport 1920x1080` возвращает дерево с указанным viewport.
 - [x] `click` возвращает `{ clicked: true }` и не пересчитывает граф.
-- [x] Граф содержит только `<body>` и потомков; `<html>`/`<head>` исключены.
+- [x] Дерево содержит только `<body>` и потомков; `<html>`/`<head>` исключены.
 - [x] Текст `<script>`/`<style>` не попадает в `text`.
 - [x] **Actions**: fill, type, hover, focus, press, scroll, scrollIntoView, wait, eval.
 - [x] **Batch**: JSON stdin и позиционные команды.

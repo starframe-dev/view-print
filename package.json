@@ -1,6 +1,6 @@
 {
     "name": "@starframe/view-print",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "description": "AI tool for extracting precise layout graphs from web pages via Playwright",
     "type": "module",
     "main": "./dist/index.js",
@@ -14,7 +14,9 @@
         "build": "tsc",
         "dev": "tsc --watch",
         "test": "vitest run",
-        "lint": "tsc --noEmit"
+        "lint": "tsc --noEmit",
+        "reinstall-global": "viewprint daemon stop; pnpm add -g file:. --force",
+        "deploy": "pnpm run lint && pnpm run test && pnpm run build && pnpm run reinstall-global"
     },
     "keywords": [
         "playwright",

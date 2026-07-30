@@ -9,9 +9,9 @@ AI-инструмент для извлечения точного графа в
 
 ## Возможности
 
-- 🗺️ **Capture** — облегчённый граф элементов `<body>` с `parentId`, `role`, `name`, `boundingBox`.
+- 🗺️ **Capture** — облегчённое дерево элементов `<body>`, раскрытое до `--depth` (default 1, свёрнутые ветки показывают `childrenCount`). `--expand <ids>` задаёт альтернативные корни (body не показывается).
 - 🔍 **Inspect** — полные `computedStyles`, `cascade` и псевдо-элементы для конкретного узла.
-- 🌳 **Snapshot** — accessibility tree с `@e1`, `@e2` refs.
+- 🌳 **Snapshot** — accessibility tree с `@e1`, `@e2` refs, `--depth` и `--expand`.
 - 🎯 **Actions** — `click`, `fill`, `type`, `hover`, `focus`, `press`, `scroll`, `scrollIntoView`, `wait`, `eval`.
 - 📜 **Batch** — JSON-массив команд за один запрос.
 - 🌐 **Network** — отслеживание, HAR, mock `route`/`unroute`.
@@ -38,6 +38,18 @@ pnpm run build
 ln -sf /Users/a/Space/Projects/Starframe/view-print/dist/src/cli.js ~/Space/Tools/bin/viewprint
 ```
 
+## Разработка
+
+После правок в `src/` нужно пересобрать и переустановить глобальный бинарь, а также убить daemon (иначе новый код не подхватится):
+
+```bash
+pnpm run deploy      # lint → test → build → reinstall-global
+# или
+pnpm run build && viewprint reinstall
+```
+
+`viewprint reinstall` — перелинковывает глобальный бинарь на текущий проект и убивает daemon.
+
 ## Использование
 
 ### Демон
@@ -51,9 +63,15 @@ viewprint daemon stop
 ### Capture / snapshot
 
 ```bash
-viewprint -s mypage capture https://example.com
+viewprint -s mypage capture https://example.com                  # default: depth=1 (only top level)
+viewprint -s mypage capture https://example.com --depth 3        # expand 3 levels
+viewprint -s mypage capture https://example.com --expand e3,e5   # expand specific subtrees
+viewprint -s mypage capture https://example.com --depth 1 --expand e3   # top level + subtree
+viewprint -s mypage capture https://example.com --query "button"      # all buttons as roots
+viewprint -s mypage capture https://example.com --query ".product-card" --depth 3   # cards + 3 levels
 viewprint -s mypage capture --viewport 1920x1080
 viewprint -s mypage snapshot https://example.com
+viewprint -s mypage snapshot https://example.com --depth 9999   # full tree
 viewprint -s mypage inspect @e3    # full CSS details
 viewprint -s mypage click @e3      # click by ref
 viewprint -s mypage status
@@ -107,6 +125,7 @@ viewprint -s mypage frames list
 viewprint -s mypage frames switch iframe[name=widget]
 viewprint -s mypage screenshot /tmp/page.png
 viewprint -s mypage screenshot --element @e3
+viewprint -s mypage screenshot --element @e3 --padding 20     # с отступом вокруг элемента
 ```
 
 ### MCP server
@@ -130,23 +149,38 @@ viewprint mcp
 }
 ```
 
-## Граф
+## Граф (capture / snapshot)
 
-Плоский JSON. Связи между узлами задаются через `parentId` внутри каждого узла. Корневой элемент — `<body>`. `<html>` и `<head>` исключены. Текст `<script>` и `<style>` не включается.
+Обе команды возвращают **дерево** с корнем `<body>`. Связи задаются через вложенные `children`. Свёрнутые ветки показывают `childrenCount` (число прямых потомков) и `children: []`.
+
+- `--depth N` (default `1`): базовая глубина раскрытия. `1` — только верхний уровень, `9999` — всё дерево.
+- `--expand <ids>`: comma-separated список id (`e3,e5,e7` или `@e3,@e5,@e7`). Указанные id становятся **корнями** дерева (body в результате не показывается). depth отсчитывается от каждого root независимо. Несколько id → несколько корней. Неизвестные id тихо игнорируются.
+
+`<html>` и `<head>` исключены. Текст `<script>` и `<style>` не включается.
 
 ```json
 {
   "url": "https://example.com",
   "viewport": { "width": 1920, "height": 1080 },
-  "nodes": {
-    "e1": { "id": "e1", "tag": "body", "parentId": null, "boundingBox": {...} },
-    "e2": { "id": "e2", "tag": "div", "parentId": "e1", "role": "main", "name": "...", "boundingBox": {...} },
-    "e3": { "id": "e3", "tag": "button", "parentId": "e2", "role": "button", "name": "Submit", "text": "Submit", "boundingBox": {...} }
-  }
+  "tree": [
+    {
+      "id": "e1",
+      "tag": "body",
+      "childrenCount": 2,
+      "children": [
+        { "id": "e2", "tag": "div", "role": "main", "childrenCount": 1, "children": [] },
+        { "id": "e3", "tag": "button", "role": "button", "name": "Submit", "text": "Submit", "childrenCount": 0, "children": [] }
+      ]
+    }
+  ]
 }
 ```
 
-**Snapshot-узел** содержит: `id`, `parentId`, `tag`, `role`, `name`, `attributes`, `text`, `boundingBox`.
+`childrenCount` присутствует **всегда**: у раскрытых узлов — равен длине `children`, у свёрнутых — числу скрытых потомков, у листьев — `0`. Это единое правило.
+
+**Capture-узел** содержит: `id`, `parentId`, `tag`, `role`, `name`, `attributes`, `text`, `boundingBox`, `childrenCount`, `children`.
+
+**Snapshot-узел** содержит то же, но `attributes` нет, а `id` называется `ref`.
 
 **Полный узел (`inspect`)** дополнительно содержит: `computedStyles` (только non-`user-agent`), `cascade` (`inline`/`stylesheet`/`inherited`), `pseudo.before`, `pseudo.after`.
 
@@ -157,6 +191,8 @@ viewprint mcp
 **Текст:**
 - `text` заполняется только из **непосредственных** текстовых child-nodes (без рекурсии в дочерние элементы).
 - Содержимое `<script>`/`<style>` исключено для всех элементов.
+
+**Snapshot lift:** на раскрытых уровнях пустые контейнеры (без `role`/`name`/`text`) поднимаются, их дети всплывают наверх. На свёрнутых уровнях lift не применяется, пустой контейнер показывается как stub с `childrenCount`.
 
 ## State persistence
 
@@ -197,8 +233,8 @@ src/
 
 | Метод | Путь | Назначение |
 |-------|------|------------|
-| POST | `/sessions/:name/capture` | Capture графа |
-| POST | `/sessions/:name/snapshot` | Accessibility snapshot |
+| POST | `/sessions/:name/capture` | Capture дерева (`{ url?, viewport?, depth?, expand? }`) |
+| POST | `/sessions/:name/snapshot` | Accessibility snapshot дерева (`{ url?, viewport?, depth?, expand? }`) |
 | POST | `/sessions/:name/inspect` | Полные данные элемента |
 | POST | `/sessions/:name/click` / `fill` / `type` / `hover` / `focus` / `press` / `scroll` / `scrollintoview` | Actions |
 | POST | `/sessions/:name/wait` | Wait condition |

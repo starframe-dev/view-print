@@ -4,9 +4,9 @@ import path from 'node:path'
 import { chromium, type Browser, type BrowserContext, type BrowserContextOptions, type BrowserServer, type Cookie, type Page, type Request, type Response } from 'playwright'
 import { extractSnapshotData, inspectElement } from './extractor.js'
 import { buildGraph } from './graph.js'
-import { killProcessTree } from './process-tree.js'
+import { killProcessTree, isProcessAlive, hasOrphanedChromeProcesses, killChromeProcessesByUserDataDir } from './process-tree.js'
 import { loadSession, saveSession } from './session.js'
-import type { ElementNode, Graph, NetworkRequest, NetworkRoute, SessionState, Snapshot, SnapshotElementNode, SnapshotNode } from './types.js'
+import type { ElementNode, Graph, NetworkRequest, NetworkRoute, SessionState, Snapshot, SnapshotNode } from './types.js'
 
 export interface WaitCondition {
     selector?: string
@@ -28,6 +28,7 @@ export class BrowserSession {
     private responseHandler?: (response: Response) => void
     private harPath?: string
     private browserPid: number | null = null
+    private userDataDir: string | null = null
     private closing = false
 
     constructor(name: string) {
@@ -40,12 +41,19 @@ export class BrowserSession {
         // This is required to guarantee chromium cleanup on daemon exit.
         this.server = await chromium.launchServer({ headless: true })
         this.browserPid = this.server.process().pid ?? null
+        this.userDataDir = extractUserDataDir(this.server.process().spawnargs)
         this.browser = await chromium.connect(this.server.wsEndpoint())
         this.context = await this.browser.newContext({ storageState: this.buildStorageState() })
         this.page = await this.context.newPage()
     }
 
-    async capture(url?: string, viewport?: { width: number; height: number }): Promise<Graph> {
+    async capture(
+        url?: string,
+        viewport?: { width: number; height: number },
+        depth: number = 1,
+        expand: Set<string> = new Set(),
+        query?: string
+    ): Promise<Graph> {
         if (!this.page) {
             throw new Error('Session not started. Call start() first.')
         }
@@ -66,33 +74,61 @@ export class BrowserSession {
 
         const rawData = await this.page.evaluate(extractSnapshotData)
         const currentViewport = this.page.viewportSize() || { width: 0, height: 0 }
+
+        const expandedIds = new Set(expand)
+        if (query) {
+            const queryIds = await this.resolveQuery(query)
+            for (const id of queryIds) {
+                expandedIds.add(id)
+            }
+        }
+
         await this.persistState()
 
-        const graph = buildGraph(rawData, this.state.url, currentViewport)
+        const graph = buildGraph(rawData, this.state.url, currentViewport, depth, expandedIds, query !== undefined)
         this.lastGraph = graph
         return graph
     }
 
-    async snapshot(url?: string, viewport?: { width: number; height: number }): Promise<Snapshot> {
-        const graph = await this.capture(url, viewport)
-        const root = Object.values(graph.nodes).find((node) => node.parentId === undefined)
-
-        if (!root) {
+    async snapshot(
+        url?: string,
+        viewport?: { width: number; height: number },
+        depth: number = 1,
+        expand: Set<string> = new Set(),
+        query?: string
+    ): Promise<Snapshot> {
+        const graph = await this.capture(url, viewport, depth, expand, query)
+        if (graph.tree.length === 0) {
             return { url: graph.url, viewport: graph.viewport, tree: [] }
         }
 
-        const children = buildSnapshotChildren(graph.nodes, root.id)
-        const tree: Snapshot['tree'] = [{
+        const tree: Snapshot['tree'] = graph.tree.map((root) => ({
             ref: root.id,
             tag: root.tag,
             role: root.role,
             name: root.name,
             text: root.text,
             boundingBox: root.boundingBox,
-            children
-        }]
+            childrenCount: root.childrenCount,
+            children: buildSnapshotTree(root.children)
+        }))
 
         return { url: graph.url, viewport: graph.viewport, tree }
+    }
+
+    private async resolveQuery(selector: string): Promise<string[]> {
+        if (!this.page) {
+            throw new Error('Session not started. Call start() first.')
+        }
+        return this.page.evaluate((sel: string) => {
+            const elements = document.querySelectorAll(sel)
+            const ids: string[] = []
+            for (const element of Array.from(elements)) {
+                const id = element.getAttribute('data-viewprint-id')
+                if (id) ids.push(id)
+            }
+            return ids
+        }, selector)
     }
 
     async inspect(elementId: string): Promise<ElementNode | null> {
@@ -477,14 +513,21 @@ export class BrowserSession {
         await Promise.race([gracefulClose, timeout])
 
         // If browser process is still alive, kill its process tree as fallback
-        if (this.browserPid !== null) {
-            const { isProcessAlive } = await import('./process-tree.js')
+        if (this.browserPid !== null && isProcessAlive(this.browserPid)) {
+            killProcessTree(this.browserPid)
+            await new Promise<void>((resolve) => setTimeout(resolve, 500))
             if (isProcessAlive(this.browserPid)) {
-                killProcessTree(this.browserPid)
+                killProcessTree(this.browserPid, 'SIGKILL')
                 await new Promise<void>((resolve) => setTimeout(resolve, 500))
-                if (isProcessAlive(this.browserPid)) {
-                    killProcessTree(this.browserPid, 'SIGKILL')
-                }
+            }
+        }
+
+        // Belt-and-suspenders: scan for orphaned chrome processes matching our user-data-dir
+        if (this.userDataDir && hasOrphanedChromeProcesses(this.userDataDir)) {
+            killChromeProcessesByUserDataDir(this.userDataDir, 'SIGTERM')
+            await new Promise<void>((resolve) => setTimeout(resolve, 500))
+            if (hasOrphanedChromeProcesses(this.userDataDir)) {
+                killChromeProcessesByUserDataDir(this.userDataDir, 'SIGKILL')
             }
         }
 
@@ -493,6 +536,7 @@ export class BrowserSession {
         this.server = null
         this.page = null
         this.browserPid = null
+        this.userDataDir = null
     }
 
     getState(): SessionState {
@@ -504,7 +548,8 @@ export class BrowserSession {
     }
 
     private selectorFor(elementId: string): string {
-        return `[data-viewprint-id="${elementId}"]`
+        const ref = elementId.startsWith('@') ? elementId.slice(1) : elementId
+        return `[data-viewprint-id="${ref}"]`
     }
 
     private async ensureElementIds(): Promise<void> {
@@ -657,14 +702,40 @@ export class BrowserSession {
         return outputPath
     }
 
-    async screenshotElement(elementId: string, path?: string): Promise<string> {
+    async screenshotElement(elementId: string, padding: number = 0, path?: string): Promise<string> {
         if (!this.page) {
             throw new Error('Session not started. Call start() first.')
         }
         await this.ensureElementIds()
         const selector = this.selectorFor(elementId)
         const outputPath = path ?? this.defaultScreenshotPath('element')
-        await this.page.locator(selector).screenshot({ path: outputPath })
+
+        if (padding <= 0) {
+            await this.page.locator(selector).screenshot({ path: outputPath })
+            return outputPath
+        }
+
+        // With padding: capture a clip area around the element's bounding box.
+        // Clamped to the viewport — if padding exceeds visible bounds, the
+        // element may be clipped; users should use scrollintoview first.
+        const bbox = await this.page.locator(selector).boundingBox()
+        if (!bbox) {
+            throw new Error(`Element ${elementId} not found or not visible`)
+        }
+        const viewport = this.page.viewportSize() ?? { width: bbox.width + 2 * padding, height: bbox.height + 2 * padding }
+        const clip = {
+            x: Math.max(0, Math.floor(bbox.x - padding)),
+            y: Math.max(0, Math.floor(bbox.y - padding)),
+            width: Math.min(
+                viewport.width - Math.max(0, Math.floor(bbox.x - padding)),
+                Math.ceil(bbox.width + 2 * padding)
+            ),
+            height: Math.min(
+                viewport.height - Math.max(0, Math.floor(bbox.y - padding)),
+                Math.ceil(bbox.height + 2 * padding)
+            )
+        }
+        await this.page.screenshot({ path: outputPath, clip })
         return outputPath
     }
 
@@ -771,33 +842,63 @@ export class BrowserSession {
     }
 }
 
-function buildSnapshotChildren(nodes: Record<string, SnapshotElementNode>, parentId: string): SnapshotNode[] {
-    const children: SnapshotNode[] = []
+function buildSnapshotTree(
+    children: import('./types.js').CaptureNode[]
+): SnapshotNode[] {
+    const result: SnapshotNode[] = []
 
-    for (const node of Object.values(nodes)) {
-        if (node.parentId !== parentId) {
-            continue
-        }
-
-        const grandChildren = buildSnapshotChildren(nodes, node.id)
-        const hasMeaningfulContent = node.role || node.name || node.text
+    for (const child of children) {
+        const expandedChildren = child.children.length > 0
+            ? buildSnapshotTree(child.children)
+            : []
+        const hasMeaningfulContent = child.role || child.name || child.text
 
         if (hasMeaningfulContent) {
-            children.push({
-                ref: node.id,
-                tag: node.tag,
-                role: node.role,
-                name: node.name,
-                text: node.text,
-                boundingBox: node.boundingBox,
-                children: grandChildren
+            result.push({
+                ref: child.id,
+                tag: child.tag,
+                role: child.role,
+                name: child.name,
+                text: child.text,
+                boundingBox: child.boundingBox,
+                childrenCount: child.childrenCount,
+                children: expandedChildren
             })
-        } else if (grandChildren.length > 0) {
-            children.push(...grandChildren)
+        } else if (expandedChildren.length > 0) {
+            // Lift empty container: promote grandchildren up
+            result.push(...expandedChildren)
+        } else {
+            // Collapsed empty container: keep as a stub with childrenCount
+            result.push({
+                ref: child.id,
+                tag: child.tag,
+                boundingBox: child.boundingBox,
+                childrenCount: child.childrenCount,
+                children: []
+            })
         }
     }
 
-    return children
+    return result
+}
+
+/**
+ * Extracts --user-data-dir argument value from chromium spawn args.
+ * Returns null if not found.
+ */
+function extractUserDataDir(spawnArgs: string[] | undefined): string | null {
+    if (!spawnArgs) {
+        return null
+    }
+    for (let i = 0; i < spawnArgs.length; i++) {
+        if (spawnArgs[i] === '--user-data-dir' && i + 1 < spawnArgs.length) {
+            return spawnArgs[i + 1]
+        }
+        if (spawnArgs[i].startsWith('--user-data-dir=')) {
+            return spawnArgs[i].slice('--user-data-dir='.length)
+        }
+    }
+    return null
 }
 
 export async function createBrowserSession(name: string): Promise<BrowserSession> {

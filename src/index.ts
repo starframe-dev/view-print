@@ -15,6 +15,7 @@ export {
 } from './daemon-process.js'
 export type {
     BoundingBox,
+    CaptureNode,
     CascadeEntry,
     Edge,
     ElementNode,

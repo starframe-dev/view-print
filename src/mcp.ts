@@ -18,7 +18,7 @@ interface McpResponse {
 const TOOLS = [
     {
         name: 'capture',
-        description: 'Navigate to a URL and capture the layout graph',
+        description: 'Navigate to a URL and capture the layout graph as a tree',
         inputSchema: {
             type: 'object',
             properties: {
@@ -29,7 +29,14 @@ const TOOLS = [
                         width: { type: 'number' },
                         height: { type: 'number' }
                     }
-                }
+                },
+                depth: { type: 'number', description: 'Tree depth to expand (default 1). Use a large number for full expansion.' },
+                expand: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Element ids to expand fully, regardless of depth. Accepts ids with or without @ prefix.'
+                },
+                query: { type: 'string', description: 'CSS selector. Matching elements become tree roots. Combine with depth/expand to scope the result.' }
             }
         }
     },
@@ -43,7 +50,14 @@ const TOOLS = [
                 viewport: {
                     type: 'object',
                     properties: { width: { type: 'number' }, height: { type: 'number' } }
-                }
+                },
+                depth: { type: 'number', description: 'Tree depth to expand (default 1). Use a large number for full expansion.' },
+                expand: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Element ids to expand fully, regardless of depth. Accepts ids with or without @ prefix.'
+                },
+                query: { type: 'string', description: 'CSS selector. Matching elements become tree roots. Combine with depth/expand to scope the result.' }
             }
         }
     },
@@ -107,6 +121,37 @@ function normalizeRef(elementId: string): string {
     return elementId.startsWith('@') ? elementId.slice(1) : elementId
 }
 
+function parseDepthArg(value: unknown): number {
+    if (value === undefined || value === null) {
+        return 1
+    }
+    const n = typeof value === 'number' ? value : parseInt(String(value), 10)
+    if (Number.isNaN(n) || n < 1) {
+        throw new Error('Invalid depth. Use an integer >= 1.')
+    }
+    return n
+}
+
+function parseExpandArg(value: unknown): Set<string> {
+    if (value === undefined || value === null) {
+        return new Set()
+    }
+    if (!Array.isArray(value)) {
+        throw new Error('Invalid expand. Use an array of element ids.')
+    }
+    const set = new Set<string>()
+    for (const raw of value) {
+        if (typeof raw !== 'string') {
+            throw new Error('Invalid expand. Each id must be a string.')
+        }
+        const id = raw.startsWith('@') ? raw.slice(1) : raw
+        if (id.length > 0) {
+            set.add(id)
+        }
+    }
+    return set
+}
+
 export async function runMcpServer(): Promise<void> {
     const rl = readline.createInterface({ input: process.stdin })
 
@@ -143,11 +188,29 @@ export async function runMcpServer(): Promise<void> {
 
                 switch (toolName) {
                     case 'capture': {
-                        const graph = await session.capture(args.url as string | undefined, args.viewport as { width: number; height: number } | undefined)
+                        const depth = parseDepthArg(args.depth)
+                        const expand = parseExpandArg(args.expand)
+                        const query = typeof args.query === 'string' && args.query.length > 0 ? args.query : undefined
+                        const graph = await session.capture(
+                            args.url as string | undefined,
+                            args.viewport as { width: number; height: number } | undefined,
+                            depth,
+                            expand,
+                            query
+                        )
                         return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(graph) }] } }
                     }
                     case 'snapshot': {
-                        const snapshot = await session.snapshot(args.url as string | undefined, args.viewport as { width: number; height: number } | undefined)
+                        const depth = parseDepthArg(args.depth)
+                        const expand = parseExpandArg(args.expand)
+                        const query = typeof args.query === 'string' && args.query.length > 0 ? args.query : undefined
+                        const snapshot = await session.snapshot(
+                            args.url as string | undefined,
+                            args.viewport as { width: number; height: number } | undefined,
+                            depth,
+                            expand,
+                            query
+                        )
                         return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(snapshot) }] } }
                     }
                     case 'click': {

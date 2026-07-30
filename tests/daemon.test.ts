@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { spawn } from 'node:child_process'
+import { spawn, execSync } from 'node:child_process'
 import path from 'node:path'
 import { ViewPrintDaemon } from '../src/daemon.js'
 import { DaemonClient } from '../src/daemon-client.js'
-import type { ElementNode } from '../src/types.js'
+import type { CaptureNode, ElementNode } from '../src/types.js'
 
 const testPage = `data:text/html,${encodeURIComponent(`
 <!DOCTYPE html>
@@ -25,6 +25,23 @@ const testPage = `data:text/html,${encodeURIComponent(`
 </html>
 `)}`
 
+function flattenTree(tree: CaptureNode[]): Record<string, CaptureNode> {
+    const result: Record<string, CaptureNode> = {}
+
+    function walk(node: CaptureNode): void {
+        result[node.id] = node
+        for (const child of node.children) {
+            walk(child)
+        }
+    }
+
+    for (const root of tree) {
+        walk(root)
+    }
+
+    return result
+}
+
 describe('ViewPrintDaemon', () => {
     let daemon: ViewPrintDaemon
     let client: DaemonClient
@@ -45,15 +62,31 @@ describe('ViewPrintDaemon', () => {
         expect(body).toEqual({ ok: true })
     })
 
-    it('captures lightweight layout graph', async () => {
+    it('captures lightweight layout tree at depth=1', async () => {
         const graph = await client.capture('test-daemon', testPage)
 
         expect(graph.url).toBe(testPage)
-        expect(Object.keys(graph.nodes).length).toBeGreaterThan(0)
+        expect(graph.tree).toHaveLength(1)
+        expect(graph.tree[0].tag).toBe('body')
+        // depth=1: every direct child is collapsed with childrenCount
+        for (const child of graph.tree[0].children) {
+            expect(child.children).toEqual([])
+        }
 
-        const node = Object.values(graph.nodes)[0]
+        const flat = flattenTree(graph.tree)
+        const node = Object.values(flat)[0]
         expect('computedStyles' in node).toBe(false)
         expect('cascade' in node).toBe(false)
+    })
+
+    it('respects depth parameter via HTTP API', async () => {
+        const graph = await client.capture('test-daemon-depth', testPage, undefined, 9999)
+
+        // At depth=9999, button should be reachable as a nested descendant
+        const flat = flattenTree(graph.tree)
+        const button = Object.values(flat).find((node) => node.tag === 'button')
+        expect(button).toBeDefined()
+        expect(button!.text).toBe('Add')
     })
 
     it('captures accessibility snapshot tree', async () => {
@@ -66,9 +99,11 @@ describe('ViewPrintDaemon', () => {
         expect(root.tag).toBe('body')
         expect(root.children.length).toBeGreaterThan(0)
 
-        const button = root.children.find((node) => node.role === 'button')
-        expect(button).toBeDefined()
-        expect(button!.name).toBe('Add')
+        // At depth=1 the button is hidden inside a collapsed container; container is shown as stub
+        const container = root.children.find((node) => node.ref === 'e2')
+        expect(container).toBeDefined()
+        expect(container!.childrenCount).toBeGreaterThan(0)
+        expect(container!.children).toEqual([])
     })
 
     it('executes batch commands', async () => {
@@ -83,6 +118,52 @@ describe('ViewPrintDaemon', () => {
         expect((results.results[0] as { url: string }).url).toBe(testPage)
         expect((results.results[1] as { result: string }).result).toBe('Daemon Test')
         expect((results.results[2] as { url: string; elementCount: number }).elementCount).toBeGreaterThan(0)
+    })
+
+    it('executes batch with depth in options object', async () => {
+        const results = await client.batch('test-daemon-depth-batch', [
+            ['capture', { url: testPage, depth: 9999 }]
+        ])
+
+        const captureResult = results.results[0] as { tree: CaptureNode[] }
+        const flat = flattenTree(captureResult.tree)
+        const button = Object.values(flat).find((node) => node.tag === 'button')
+        expect(button).toBeDefined()
+    })
+
+    it('passes expand via HTTP API', async () => {
+        // --expand e3 makes e3 the tree root (body excluded)
+        const graph = await client.capture('test-daemon-expand', testPage, undefined, 9999, ['e3'])
+
+        expect(graph.tree).toHaveLength(1)
+        expect(graph.tree[0].id).toBe('e3')
+        expect(graph.tree[0].tag).toBe('button')
+        expect(graph.tree[0].text).toBe('Add')
+        // depth=9999, full subtree visible
+        expect(graph.tree[0].childrenCount).toBe(0)
+    })
+
+    it('ignores unknown expand ids gracefully', async () => {
+        const graph = await client.capture('test-daemon-expand-unknown', testPage, undefined, 1, ['e999', 'e888'])
+
+        // All expand ids unknown → tree is empty
+        expect(graph.tree).toEqual([])
+    })
+
+    it('passes CSS query via HTTP API', async () => {
+        const graph = await client.capture('test-daemon-query', testPage, undefined, 9999, [], 'button')
+
+        expect(graph.tree.length).toBe(1)
+        expect(graph.tree[0].tag).toBe('button')
+        expect(graph.tree[0].text).toBe('Add')
+        // body excluded; button is the root
+        expect(graph.tree[0].id).not.toBe('e1')
+    })
+
+    it('returns empty tree for query with no matches via HTTP API', async () => {
+        const graph = await client.capture('test-daemon-query-empty', testPage, undefined, 1, [], '.nope')
+
+        expect(graph.tree).toEqual([])
     })
 
     it('fills input and evaluates JavaScript via daemon', async () => {
@@ -103,8 +184,9 @@ describe('ViewPrintDaemon', () => {
     })
 
     it('inspects full element details', async () => {
-        const graph = await client.capture('test-daemon', testPage)
-        const buttonId = Object.entries(graph.nodes).find(
+        const graph = await client.capture('test-daemon', testPage, undefined, 9999)
+        const flat = flattenTree(graph.tree)
+        const buttonId = Object.entries(flat).find(
             ([, node]) => node.tag === 'button'
         )?.[0]
         expect(buttonId).toBeDefined()
@@ -116,11 +198,13 @@ describe('ViewPrintDaemon', () => {
         expect(element.cascade.some((entry) => entry.property === 'color')).toBe(true)
     })
 
-    it('clicks element and updated graph can be captured', async () => {
-        const graph = await client.capture('test-daemon', testPage)
-        const initialCount = Object.keys(graph.nodes).length
+    it('clicks element and updated tree can be captured', async () => {
+        // Use full depth for both captures so counts are comparable
+        const graph = await client.capture('test-daemon', testPage, undefined, 9999)
+        const initialCount = Object.keys(flattenTree(graph.tree)).length
 
-        const buttonId = Object.entries(graph.nodes).find(
+        const flat = flattenTree(graph.tree)
+        const buttonId = Object.entries(flat).find(
             ([, node]) => node.tag === 'button'
         )?.[0]
         expect(buttonId).toBeDefined()
@@ -128,8 +212,9 @@ describe('ViewPrintDaemon', () => {
         const clickResult = await client.click('test-daemon', buttonId!)
         expect(clickResult).toEqual({ clicked: true })
 
-        const updatedGraph = await client.capture('test-daemon')
-        const updatedCount = Object.keys(updatedGraph.nodes).length
+        // No url — re-capture current page (the click added a new element)
+        const updatedGraph = await client.capture('test-daemon', undefined, undefined, 9999)
+        const updatedCount = Object.keys(flattenTree(updatedGraph.tree)).length
 
         expect(updatedCount).toBeGreaterThan(initialCount)
     })
@@ -245,4 +330,58 @@ describe('ViewPrintDaemon integration', () => {
             try { child.kill('SIGKILL') } catch { /* ignore */ }
         }
     }, 15000)
+
+    it('kills chrome-headless-shell descendants after shutdown', async () => {
+        const port = 17352
+        const entryScript = path.resolve(__dirname, '../dist/src/daemon-entry.js')
+        const child = spawn(process.execPath, [entryScript, `--port=${port}`], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, VIEWPRINT_PORT: String(port) }
+        })
+
+        try {
+            // Wait for daemon to be ready
+            for (let i = 0; i < 50; i++) {
+                try {
+                    const res = await fetch(`http://localhost:${port}/health`)
+                    if (res.ok) break
+                } catch { /* not ready yet */ }
+                await new Promise((resolve) => setTimeout(resolve, 100))
+            }
+
+            // Make a capture to spawn chromium
+            const response = await fetch(`http://localhost:${port}/sessions/cleanup-test/capture`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: testPage })
+            })
+            expect(response.status).toBe(200)
+
+            // Confirm chrome processes exist
+            const before = execSync('ps -axo pid,command | grep -E "chrome-headless-shell" | grep -v grep || true', { encoding: 'utf-8' })
+            expect(before.trim().length).toBeGreaterThan(0)
+
+            // Shutdown
+            const shutdownResponse = await fetch(`http://localhost:${port}/shutdown`, { method: 'POST' })
+            expect(shutdownResponse.status).toBe(200)
+
+            // Wait for daemon to exit
+            await new Promise<number | null>((resolve) => {
+                const timeout = setTimeout(() => resolve(-1), 5000)
+                child.on('exit', (code) => {
+                    clearTimeout(timeout)
+                    resolve(code)
+                })
+            })
+
+            // Give OS a moment to reap
+            await new Promise((resolve) => setTimeout(resolve, 500))
+
+            // Verify no chrome-headless-shell processes remain
+            const after = execSync('ps -axo pid,command | grep -E "chrome-headless-shell" | grep -v grep || true', { encoding: 'utf-8' })
+            expect(after.trim()).toBe('')
+        } finally {
+            try { child.kill('SIGKILL') } catch { /* ignore */ }
+        }
+    }, 30000)
 })

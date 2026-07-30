@@ -191,3 +191,64 @@ export interface DaemonOptions {
 - Idle check interval сделан настраиваемым через
   `VIEWPRINT_IDLE_CHECK_INTERVAL_MS` (для тестов).
 
+## Дополнительно: belt-and-suspenders cleanup (для Playwright API drift)
+
+Проблема: в глобально установленной версии `@starframe/view-print@0.1.1`
+используется `chromium.launch()` без `launchServer`, поэтому
+`BrowserServer.process().pid` исторически был `undefined`/null. В этом
+случае `killProcessTree(browserPid)` — no-op, а chromium-процессы остаются
+висеть после `daemon stop`. То же поведение возможно при будущих изменениях
+в Playwright API.
+
+Решение — тройная страховка в `BrowserSession.close()` и `daemon.stop()`:
+
+1. **Primary**: `killProcessTree(browserPid)` — работает в новой версии
+   (`chromium.launchServer()`).
+2. **Secondary**: `killChromeProcessesByUserDataDir(userDataDir)` — ищет
+   chrome-процессы по `--user-data-dir` в их командной строке
+   (`ps -axo pid,command | grep`). Покрывает случаи когда `browserPid` —
+   `null`, но дочерние процессы всё равно созданы с известным
+   `user-data-dir`.
+3. **Tertiary** (в `daemon.stop()`): `killRemainingDescendants()` —
+   `SIGKILL` всех потомков **демона** через `getProcessTreePids(process.pid)`.
+   Покрывает любые orphan-процессы независимо от того, кто их создал.
+4. **Sync fallback** (в `daemon-entry.ts` `process.on('exit')`): если event
+   loop завершается до `daemon.stop()` (например, `kill -9` родителя
+   через OOM-killer), `SIGKILL` всех потомков демона синхронно.
+
+Изменения в файлах:
+
+- `src/process-tree.ts` — добавить:
+  - `findChromeProcessesByUserDataDir(dir): number[]` — ищет
+    `chrome-headless-shell`/`Google Chrome` процессы с указанным
+    `--user-data-dir`.
+  - `hasOrphanedChromeProcesses(dir): boolean` — обёртка.
+  - `killChromeProcessesByUserDataDir(dir, signal): number` —
+    возвращает количество убитых процессов.
+- `src/browser.ts`:
+  - Захватывать `--user-data-dir` из `server.process().spawnargs` в
+    `BrowserSession.userDataDir`.
+  - В `close()` после `killProcessTree` — fallback
+    `killChromeProcessesByUserDataDir(userDataDir)`.
+- `src/daemon.ts`:
+  - `ViewPrintDaemon.killRemainingDescendants(): number` — публичный метод
+    для тестов.
+  - `stop()` после закрытия HTTP-сервера вызывает
+    `killRemainingDescendants()` (SIGKILL).
+- `src/daemon-entry.ts`:
+  - `process.on('exit', ...)` синхронно убивает всех потомков демона.
+
+Критерии приёмки (дополнение):
+
+- [x] После `viewprint daemon stop` команда `ps -axo pid,command | grep
+      chrome-headless-shell` возвращает пустой результат — даже если
+      `BrowserServer.process().pid` был `undefined`.
+- [x] Интеграционный тест `kills chrome-headless-shell descendants after
+      shutdown` запускает реальный daemon, делает `capture`, шлёт
+      `/shutdown`, и проверяет что после выхода демона не осталось
+      `chrome-headless-shell` процессов.
+- [x] Unit-тесты `findChromeProcessesByUserDataDir`,
+      `hasOrphanedChromeProcesses`, `killChromeProcessesByUserDataDir` —
+      покрывают пустые входы, несуществующие директории, реальное убийство
+      mock-процесса с правильным `--user-data-dir`.
+

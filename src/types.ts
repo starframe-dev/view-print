@@ -50,10 +50,23 @@ export interface Edge {
     type: 'child' | 'pseudo'
 }
 
+export interface CaptureNode {
+    id: string
+    parentId?: string
+    tag: string
+    role?: string
+    name?: string
+    attributes: Record<string, string>
+    text?: string
+    boundingBox: BoundingBox
+    childrenCount: number
+    children: CaptureNode[]
+}
+
 export interface Graph {
     url: string
     viewport: { width: number; height: number }
-    nodes: Record<string, SnapshotElementNode>
+    tree: CaptureNode[]
 }
 
 export interface SnapshotNode {
@@ -63,6 +76,7 @@ export interface SnapshotNode {
     name?: string
     text?: string
     boundingBox: BoundingBox
+    childrenCount: number
     children: SnapshotNode[]
 }
 

@@ -44,18 +44,36 @@ export class DaemonClient {
     async capture(
         session: string,
         url?: string,
-        viewport?: { width: number; height: number }
+        viewport?: { width: number; height: number },
+        depth: number = 1,
+        expand: Iterable<string> = [],
+        query?: string
     ): Promise<Graph> {
-        const response = await this.post(`/sessions/${session}/capture`, { url, viewport })
+        const response = await this.post(`/sessions/${session}/capture`, {
+            url,
+            viewport,
+            depth,
+            expand: Array.from(expand),
+            query
+        })
         return this.handleResponse(response, 'Capture') as Promise<Graph>
     }
 
     async snapshot(
         session: string,
         url?: string,
-        viewport?: { width: number; height: number }
+        viewport?: { width: number; height: number },
+        depth: number = 1,
+        expand: Iterable<string> = [],
+        query?: string
     ): Promise<Snapshot> {
-        const response = await this.post(`/sessions/${session}/snapshot`, { url, viewport })
+        const response = await this.post(`/sessions/${session}/snapshot`, {
+            url,
+            viewport,
+            depth,
+            expand: Array.from(expand),
+            query
+        })
         return this.handleResponse(response, 'Snapshot') as Promise<Snapshot>
     }
 
@@ -255,8 +273,13 @@ export class DaemonClient {
         return this.handleResponse(response, 'ScreenshotPage') as Promise<{ path: string }>
     }
 
-    async screenshotElement(session: string, elementId: string, path?: string): Promise<{ path: string }> {
-        const response = await this.post(`/sessions/${session}/screenshot/element`, { elementId, path })
+    async screenshotElement(
+        session: string,
+        elementId: string,
+        padding: number = 0,
+        path?: string
+    ): Promise<{ path: string }> {
+        const response = await this.post(`/sessions/${session}/screenshot/element`, { elementId, padding, path })
         return this.handleResponse(response, 'ScreenshotElement') as Promise<{ path: string }>
     }
 

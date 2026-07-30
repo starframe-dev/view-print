@@ -2,6 +2,7 @@ import http from 'node:http'
 import { URL } from 'node:url'
 import { BrowserSession } from './browser.js'
 import type { WaitCondition } from './browser.js'
+import { getProcessTreePids } from './process-tree.js'
 import type { NetworkRoute } from './types.js'
 
 export interface DaemonOptions {
@@ -84,6 +85,10 @@ export class ViewPrintDaemon {
                     this.server!.close(() => resolve())
                 })
             }
+
+            // Belt-and-suspenders: kill any remaining descendants of the daemon process
+            // (covers orphan chrome helpers even if browserPid was unknown)
+            this.killRemainingDescendants()
         })()
 
         const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, STOP_TIMEOUT_MS))
@@ -102,6 +107,25 @@ export class ViewPrintDaemon {
      */
     getLastActivityAt(): number {
         return this.lastActivityAt
+    }
+
+    /**
+     * Sends SIGKILL to all descendant processes of the daemon itself.
+     * Used as last-resort cleanup so orphan chromium helpers never survive daemon exit.
+     * Returns the number of PIDs signaled.
+     */
+    killRemainingDescendants(): number {
+        const pids = getProcessTreePids(process.pid)
+        let killed = 0
+        for (const pid of pids) {
+            try {
+                process.kill(pid, 'SIGKILL')
+                killed++
+            } catch {
+                /* ignore */
+            }
+        }
+        return killed
     }
 
     private checkIdle(): void {
@@ -166,7 +190,13 @@ export class ViewPrintDaemon {
             if (req.method === 'POST' && action === 'capture') {
                 const body = await this.readJson(req)
                 const session = await this.getOrCreateSession(sessionName)
-                const graph = await session.capture(body.url, body.viewport)
+                const graph = await session.capture(
+                    body.url,
+                    body.viewport,
+                    this.parseDepth(body.depth),
+                    this.parseExpand(body.expand),
+                    this.parseQuery(body.query)
+                )
                 this.sendJson(res, 200, graph)
                 return
             }
@@ -174,7 +204,13 @@ export class ViewPrintDaemon {
             if (req.method === 'POST' && action === 'snapshot') {
                 const body = await this.readJson(req)
                 const session = await this.getOrCreateSession(sessionName)
-                const snapshot = await session.snapshot(body.url, body.viewport)
+                const snapshot = await session.snapshot(
+                    body.url,
+                    body.viewport,
+                    this.parseDepth(body.depth),
+                    this.parseExpand(body.expand),
+                    this.parseQuery(body.query)
+                )
                 this.sendJson(res, 200, snapshot)
                 return
             }
@@ -461,7 +497,8 @@ export class ViewPrintDaemon {
             if (req.method === 'POST' && action === 'screenshot' && subAction === 'element') {
                 const body = await this.readJson(req)
                 const session = this.getExistingSession(sessionName)
-                const outputPath = await session.screenshotElement(body.elementId, body.path)
+                const padding = typeof body.padding === 'number' && body.padding >= 0 ? body.padding : 0
+                const outputPath = await session.screenshotElement(body.elementId, padding, body.path)
                 this.sendJson(res, 200, { path: outputPath })
                 return
             }
@@ -563,10 +600,26 @@ export class ViewPrintDaemon {
 
     private async executeCommand(session: BrowserSession, name: string, args: unknown[]): Promise<unknown> {
         switch (name) {
-            case 'capture':
-                return session.capture(args[0] as string | undefined, args[1] as { width: number; height: number } | undefined)
-            case 'snapshot':
-                return session.snapshot(args[0] as string | undefined, args[1] as { width: number; height: number } | undefined)
+            case 'capture': {
+                const [urlArg, optionsArg] = this.normalizeCaptureArgs(args)
+                return session.capture(
+                    urlArg,
+                    optionsArg?.viewport as { width: number; height: number } | undefined,
+                    this.parseDepth(optionsArg?.depth),
+                    this.parseExpand(optionsArg?.expand),
+                    this.parseQuery(optionsArg?.query)
+                )
+            }
+            case 'snapshot': {
+                const [urlArg, optionsArg] = this.normalizeCaptureArgs(args)
+                return session.snapshot(
+                    urlArg,
+                    optionsArg?.viewport as { width: number; height: number } | undefined,
+                    this.parseDepth(optionsArg?.depth),
+                    this.parseExpand(optionsArg?.expand),
+                    this.parseQuery(optionsArg?.query)
+                )
+            }
             case 'inspect':
                 return session.inspect(args[0] as string)
             case 'click':
@@ -607,6 +660,64 @@ export class ViewPrintDaemon {
             default:
                 throw new Error(`Unknown command: ${name}`)
         }
+    }
+
+    private parseDepth(value: unknown): number {
+        if (value === undefined || value === null) {
+            return 1
+        }
+        const n = typeof value === 'number' ? value : parseInt(String(value), 10)
+        if (Number.isNaN(n) || n < 1) {
+            throw new Error('Invalid depth. Use an integer >= 1.')
+        }
+        return n
+    }
+
+    private parseExpand(value: unknown): Set<string> {
+        if (!value) {
+            return new Set()
+        }
+        if (!Array.isArray(value)) {
+            throw new Error('Invalid expand. Use an array of element ids.')
+        }
+        const set = new Set<string>()
+        for (const raw of value) {
+            if (typeof raw !== 'string') {
+                throw new Error('Invalid expand. Each id must be a string.')
+            }
+            const id = raw.startsWith('@') ? raw.slice(1) : raw
+            if (id.length > 0) {
+                set.add(id)
+            }
+        }
+        return set
+    }
+
+    private parseQuery(value: unknown): string | undefined {
+        if (value === undefined || value === null || value === '') {
+            return undefined
+        }
+        if (typeof value !== 'string') {
+            throw new Error('Invalid query. Must be a CSS selector string.')
+        }
+        return value
+    }
+
+    private normalizeCaptureArgs(
+        args: unknown[]
+    ): [string | undefined, { viewport?: unknown; depth?: unknown; expand?: unknown; query?: unknown } | undefined] {
+        if (args.length === 0) {
+            return [undefined, undefined]
+        }
+        const [first, second] = args
+        if (first && typeof first === 'object' && !Array.isArray(first)) {
+            const obj = first as { url?: unknown; viewport?: unknown; depth?: unknown; expand?: unknown; query?: unknown }
+            return [obj.url as string | undefined, obj]
+        }
+        if (second && typeof second === 'object' && !Array.isArray(second)) {
+            return [first as string | undefined, second as { viewport?: unknown; depth?: unknown; expand?: unknown; query?: unknown }]
+        }
+        return [first as string | undefined, undefined]
     }
 
     private readJson(req: http.IncomingMessage): Promise<Record<string, any>> {

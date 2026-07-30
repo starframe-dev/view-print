@@ -66,3 +66,59 @@ export function isProcessAlive(pid: number): boolean {
         return false
     }
 }
+
+/**
+ * Returns PIDs of all chrome-headless-shell and Google Chrome processes
+ * whose command line references the given userDataDir. Used as a last-resort
+ * cleanup when browserPid is unknown (e.g. Playwright dropped Browser.process()).
+ */
+export function findChromeProcessesByUserDataDir(userDataDir: string): number[] {
+    if (!userDataDir) {
+        return []
+    }
+    try {
+        const escaped = userDataDir.replace(/"/g, '\\"')
+        const output = execSync(`ps -axo pid,command | grep -E "chrome-headless-shell|Google Chrome" | grep -F "${escaped}" | grep -v grep`, {
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: 2000
+        })
+        const pids: number[] = []
+        for (const line of output.split('\n')) {
+            const trimmed = line.trim()
+            if (!trimmed) continue
+            const pid = parseInt(trimmed.split(/\s+/)[0], 10)
+            if (!isNaN(pid) && pid > 0) {
+                pids.push(pid)
+            }
+        }
+        return pids
+    } catch {
+        return []
+    }
+}
+
+/**
+ * Returns true if any chrome processes for the given userDataDir are still alive.
+ */
+export function hasOrphanedChromeProcesses(userDataDir: string): boolean {
+    return findChromeProcessesByUserDataDir(userDataDir).length > 0
+}
+
+/**
+ * Sends a signal to all chrome processes matching the given userDataDir.
+ * Returns the number of processes that were signaled.
+ */
+export function killChromeProcessesByUserDataDir(userDataDir: string, signal: NodeJS.Signals = 'SIGTERM'): number {
+    const pids = findChromeProcessesByUserDataDir(userDataDir)
+    let killed = 0
+    for (const pid of pids) {
+        try {
+            process.kill(pid, signal)
+            killed++
+        } catch {
+            /* ignore */
+        }
+    }
+    return killed
+}

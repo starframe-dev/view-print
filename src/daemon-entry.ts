@@ -1,5 +1,6 @@
 import { startDaemon } from './daemon.js'
 import { getIdleTimeoutFromEnv } from './daemon-process.js'
+import { getProcessTreePids } from './process-tree.js'
 
 const CLEANUP_TIMEOUT_MS = 5000
 
@@ -42,9 +43,12 @@ async function main(): Promise<void> {
 
     // Best-effort sync cleanup if event loop is exiting
     process.on('exit', () => {
-        // Synchronous only — daemon.stop() cannot be awaited here
-        // daemon.stop() handles its own timeouts; if it didn't finish, chromium
-        // tree is still tracked and will be killed by SIGKILL fallback in browser.close()
+        // Synchronous only — daemon.stop() cannot be awaited here.
+        // Kill any descendants synchronously to prevent orphan chromium helpers.
+        const pids = getProcessTreePids(process.pid)
+        for (const pid of pids) {
+            try { process.kill(pid, 'SIGKILL') } catch { /* ignore */ }
+        }
     })
 
     process.on('SIGTERM', () => { void cleanup(0) })

@@ -1,6 +1,17 @@
 import { spawn, execSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { getChildPids, getProcessTreePids, isProcessAlive, killProcessTree } from '../src/process-tree.js'
+import {
+    findChromeProcessesByUserDataDir,
+    getChildPids,
+    getProcessTreePids,
+    hasOrphanedChromeProcesses,
+    isProcessAlive,
+    killChromeProcessesByUserDataDir,
+    killProcessTree
+} from '../src/process-tree.js'
 
 const spawned: ReturnType<typeof spawn>[] = []
 
@@ -116,5 +127,47 @@ describe('process-tree', () => {
     it('getChildPids returns empty array for non-existent process', () => {
         const children = getChildPids(999999)
         expect(children).toEqual([])
+    })
+
+    it('findChromeProcessesByUserDataDir returns empty for unknown dir', () => {
+        const fakeDir = path.join(os.tmpdir(), 'viewprint-test-nonexistent-' + Date.now())
+        const pids = findChromeProcessesByUserDataDir(fakeDir)
+        expect(pids).toEqual([])
+    })
+
+    it('findChromeProcessesByUserDataDir returns empty for empty input', () => {
+        expect(findChromeProcessesByUserDataDir('')).toEqual([])
+    })
+
+    it('hasOrphanedChromeProcesses returns false for unknown dir', () => {
+        const fakeDir = path.join(os.tmpdir(), 'viewprint-test-nonexistent-' + Date.now())
+        expect(hasOrphanedChromeProcesses(fakeDir)).toBe(false)
+    })
+
+    it('killChromeProcessesByUserDataDir returns 0 when nothing matches', () => {
+        const fakeDir = path.join(os.tmpdir(), 'viewprint-test-nonexistent-' + Date.now())
+        const killed = killChromeProcessesByUserDataDir(fakeDir)
+        expect(killed).toBe(0)
+    })
+
+    it('killChromeProcessesByUserDataDir kills matching chrome processes', async () => {
+        // Spawn a fake chrome-headless-shell process with a unique user-data-dir in args
+        const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'viewprint-test-chrome-'))
+        const child = spawn(
+            '/bin/sh',
+            ['-c', `exec -a 'chrome-headless-shell --user-data-dir=${userDataDir} --remote-debugging-pipe' sleep 600`],
+            { stdio: 'ignore' }
+        )
+        spawned.push(child)
+        const pid = child.pid!
+
+        const found = await waitFor(() => findChromeProcessesByUserDataDir(userDataDir).includes(pid))
+        expect(found).toBe(true)
+
+        const killed = killChromeProcessesByUserDataDir(userDataDir, 'SIGKILL')
+        expect(killed).toBeGreaterThanOrEqual(1)
+
+        const exited = await waitFor(() => !isProcessAlive(pid))
+        expect(exited).toBe(true)
     })
 })

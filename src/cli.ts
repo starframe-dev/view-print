@@ -47,18 +47,42 @@ function parseViewport(value: string): { width: number; height: number } {
     return { width: parseInt(match[1], 10), height: parseInt(match[2], 10) }
 }
 
+function parseDepth(value: string): number {
+    const n = parseInt(value, 10)
+    if (Number.isNaN(n) || n < 1) {
+        throw new Error('Invalid depth. Use an integer >= 1.')
+    }
+    return n
+}
+
+function parseExpand(value: string | undefined): string[] {
+    if (!value) {
+        return []
+    }
+    return value
+        .split(',')
+        .map((id) => id.trim())
+        .filter((id) => id.length > 0)
+        .map((id) => (id.startsWith('@') ? id.slice(1) : id))
+}
+
 function normalizeRef(elementId: string): string {
     return elementId.startsWith('@') ? elementId.slice(1) : elementId
 }
 
 program
     .command('capture [url]')
-    .description('Capture lightweight layout graph. Uses current session URL if not provided.')
+    .description('Capture lightweight layout graph as a tree. Uses current session URL if not provided.')
     .option('--viewport <size>', 'Viewport size WIDTHxHEIGHT', '1280x720')
-    .action(async (url: string | undefined, options: { viewport: string }) => {
+    .option('--depth <n>', 'Tree depth to expand (default 1). Use a large number for full expansion.', '1')
+    .option('--expand <ids>', 'Comma-separated element ids to expand fully (e.g. e3,e5 or @e3,@e5), regardless of depth.')
+    .option('--query <selector>', 'CSS selector. Matching elements become tree roots (combined with --expand).')
+    .action(async (url: string | undefined, options: { viewport: string; depth: string; expand?: string; query?: string }) => {
         const viewport = parseViewport(options.viewport)
+        const depth = parseDepth(options.depth)
+        const expand = parseExpand(options.expand)
         const client = await getClient()
-        const graph = await client.capture(getSessionName(), url, viewport)
+        const graph = await client.capture(getSessionName(), url, viewport, depth, expand, options.query)
         console.log(JSON.stringify(graph, null, 2))
     })
 
@@ -66,10 +90,15 @@ program
     .command('snapshot [url]')
     .description('Capture accessibility tree with refs. Uses current session URL if not provided.')
     .option('--viewport <size>', 'Viewport size WIDTHxHEIGHT', '1280x720')
-    .action(async (url: string | undefined, options: { viewport: string }) => {
+    .option('--depth <n>', 'Tree depth to expand (default 1). Use a large number for full expansion.', '1')
+    .option('--expand <ids>', 'Comma-separated element ids to expand fully (e.g. e3,e5 or @e3,@e5), regardless of depth.')
+    .option('--query <selector>', 'CSS selector. Matching elements become tree roots (combined with --expand).')
+    .action(async (url: string | undefined, options: { viewport: string; depth: string; expand?: string; query?: string }) => {
         const viewport = parseViewport(options.viewport)
+        const depth = parseDepth(options.depth)
+        const expand = parseExpand(options.expand)
         const client = await getClient()
-        const snapshot = await client.snapshot(getSessionName(), url, viewport)
+        const snapshot = await client.snapshot(getSessionName(), url, viewport, depth, expand, options.query)
         console.log(JSON.stringify(snapshot, null, 2))
     })
 
@@ -504,10 +533,12 @@ program
     .description('Take screenshots')
     .argument('[path]', 'Output file path (default: ~/.viewprint/screenshots/...)')
     .option('--element <elementId>', 'Screenshot specific element instead of full page')
-    .action(async (path: string | undefined, options: { element?: string }) => {
+    .option('--padding <px>', 'Extra padding around element (only with --element, default 0)', '0')
+    .action(async (path: string | undefined, options: { element?: string; padding?: string }) => {
         const client = await getClient()
         if (options.element) {
-            const result = await client.screenshotElement(getSessionName(), options.element, path)
+            const padding = parseInt(options.padding ?? '0', 10)
+            const result = await client.screenshotElement(getSessionName(), options.element, padding, path)
             console.log(JSON.stringify(result, null, 2))
         } else {
             const result = await client.screenshotPage(getSessionName(), path)
@@ -586,6 +617,22 @@ daemon
     .action(async () => {
         const running = await isDaemonRunning(getDaemonPort())
         console.log(JSON.stringify({ port: getDaemonPort(), running }, null, 2))
+    })
+
+program
+    .command('reinstall')
+    .description('Re-link the global viewprint binary to the current project. Kills the daemon so the next call picks up new code.')
+    .action(async () => {
+        const { execFileSync } = await import('node:child_process')
+        const projectRoot = new URL('..', import.meta.url).pathname
+        try {
+            await stopDaemonProcess(getDaemonPort())
+        } catch {
+            // daemon may not be running — ignore
+        }
+        console.log('Reinstalling global @starframe/view-print from', projectRoot)
+        execFileSync('pnpm', ['add', '-g', `file:${projectRoot}`, '--force'], { stdio: 'inherit' })
+        console.log(JSON.stringify({ reinstalled: true, path: projectRoot }, null, 2))
     })
 
 program.parse()
