@@ -42,6 +42,11 @@ function flattenTree(tree: CaptureNode[]): Record<string, CaptureNode> {
     return result
 }
 
+async function startDaemonOnRandomPort(daemon: ViewPrintDaemon): Promise<number> {
+    await daemon.start()
+    return daemon.getPort()
+}
+
 describe('ViewPrintDaemon', () => {
     let daemon: ViewPrintDaemon
     let client: DaemonClient
@@ -257,6 +262,73 @@ describe('ViewPrintDaemon', () => {
         const daemonNegTimeout = new ViewPrintDaemon({ port: 0, idleTimeoutMs: -100 })
         expect(daemonNegTimeout.isIdleTimeoutEnabled()).toBe(false)
     })
+
+    it('enables and reads per-action profiling via HTTP API', async () => {
+        const daemon = new ViewPrintDaemon({ port: 0 })
+        const port = await startDaemonOnRandomPort(daemon)
+        try {
+            const baseUrl = `http://localhost:${port}`
+            // Enable
+            const enableRes = await fetch(`${baseUrl}/sessions/proftest/profile`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: true })
+            })
+            expect(enableRes.status).toBe(200)
+            const enabled = await enableRes.json() as { profiling: boolean, timingsCount: number }
+            expect(enabled.profiling).toBe(true)
+            expect(enabled.timingsCount).toBe(0)
+
+            // Trigger a capture
+            const captureRes = await fetch(`${baseUrl}/sessions/proftest/capture`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: testPage })
+            })
+            expect(captureRes.status).toBe(200)
+
+            // Get timings
+            const getRes = await fetch(`${baseUrl}/sessions/proftest/profile`)
+            expect(getRes.status).toBe(200)
+            const data = await getRes.json() as { timings: Array<{ action: string, durationMs: number }>, enabled: boolean }
+            expect(data.enabled).toBe(true)
+            expect(data.timings.length).toBeGreaterThan(0)
+            expect(data.timings.some((t) => t.action === 'capture')).toBe(true)
+            for (const t of data.timings) {
+                expect(typeof t.durationMs).toBe('number')
+                expect(t.durationMs).toBeGreaterThanOrEqual(0)
+            }
+
+            // Disable
+            const disableRes = await fetch(`${baseUrl}/sessions/proftest/profile`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: false })
+            })
+            const disabled = await disableRes.json() as { profiling: boolean }
+            expect(disabled.profiling).toBe(false)
+
+            // Clear
+            const clearRes = await fetch(`${baseUrl}/sessions/proftest/profile`, { method: 'DELETE' })
+            const cleared = await clearRes.json() as { cleared: number }
+            expect(cleared.cleared).toBeGreaterThan(0)
+        } finally {
+            await daemon.stop()
+        }
+    })
+
+    it('returns empty trace report when no tracing is active', async () => {
+        const daemon = new ViewPrintDaemon({ port: 0 })
+        const port = await startDaemonOnRandomPort(daemon)
+        try {
+            const res = await fetch(`http://localhost:${port}/sessions/tracetest/trace/report`)
+            expect(res.status).toBe(200)
+            const data = await res.json() as { report: { eventCount: number } }
+            expect(data.report.eventCount).toBe(0)
+        } finally {
+            await daemon.stop()
+        }
+    })
 })
 
 describe('ViewPrintDaemon integration', () => {
@@ -339,6 +411,22 @@ describe('ViewPrintDaemon integration', () => {
             env: { ...process.env, VIEWPRINT_PORT: String(port) }
         })
 
+        // Snapshot chrome PIDs machine-wide BEFORE capture. We'll compare after shutdown
+        // to verify only our daemon's chrome descendants were killed (not chrome from other tests).
+        const listChromePids = (): Set<number> => {
+            const out = execSync(`ps -axo pid,command | grep -E "chrome-headless-shell" | grep -v grep || true`, { encoding: 'utf-8' })
+            const pids = new Set<number>()
+            for (const line of out.split('\n')) {
+                const trimmed = line.trim()
+                if (!trimmed) continue
+                const m = trimmed.match(/^(\d+)/)
+                if (m) {
+                    pids.add(parseInt(m[1], 10))
+                }
+            }
+            return pids
+        }
+
         try {
             // Wait for daemon to be ready
             for (let i = 0; i < 50; i++) {
@@ -349,6 +437,8 @@ describe('ViewPrintDaemon integration', () => {
                 await new Promise((resolve) => setTimeout(resolve, 100))
             }
 
+            const beforeCapture = listChromePids()
+
             // Make a capture to spawn chromium
             const response = await fetch(`http://localhost:${port}/sessions/cleanup-test/capture`, {
                 method: 'POST',
@@ -357,9 +447,13 @@ describe('ViewPrintDaemon integration', () => {
             })
             expect(response.status).toBe(200)
 
-            // Confirm chrome processes exist
-            const before = execSync('ps -axo pid,command | grep -E "chrome-headless-shell" | grep -v grep || true', { encoding: 'utf-8' })
-            expect(before.trim().length).toBeGreaterThan(0)
+            // Wait a moment for chrome to fully spawn
+            await new Promise((resolve) => setTimeout(resolve, 500))
+
+            // Confirm chrome processes were spawned (at least new ones vs beforeCapture)
+            const afterCapture = listChromePids()
+            const newDuringCapture = [...afterCapture].filter((p) => !beforeCapture.has(p))
+            expect(newDuringCapture.length).toBeGreaterThan(0)
 
             // Shutdown
             const shutdownResponse = await fetch(`http://localhost:${port}/shutdown`, { method: 'POST' })
@@ -375,12 +469,72 @@ describe('ViewPrintDaemon integration', () => {
             })
 
             // Give OS a moment to reap
-            await new Promise((resolve) => setTimeout(resolve, 500))
+            await new Promise((resolve) => setTimeout(resolve, 1000))
 
-            // Verify no chrome-headless-shell processes remain
-            const after = execSync('ps -axo pid,command | grep -E "chrome-headless-shell" | grep -v grep || true', { encoding: 'utf-8' })
-            expect(after.trim()).toBe('')
+            // Verify: all chrome we spawned during capture are now gone.
+            // Other chrome from other tests/processes may legitimately remain.
+            const afterShutdown = listChromePids()
+            for (const pid of newDuringCapture) {
+                expect(afterShutdown.has(pid)).toBe(false)
+            }
         } finally {
+            try { child.kill('SIGKILL') } catch { /* ignore */ }
+        }
+    }, 30000)
+
+    it('accepts skipLoad and noLoad options via HTTP /capture', async () => {
+        const port = 17353
+        const entryScript = path.resolve(__dirname, '../dist/src/daemon-entry.js')
+        const child = spawn(process.execPath, [entryScript, `--port=${port}`], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, VIEWPRINT_PORT: String(port) }
+        })
+        child.stderr?.on('data', (chunk) => {
+            process.stderr.write(`[daemon-err] ${chunk}`)
+        })
+
+        try {
+            for (let i = 0; i < 50; i++) {
+                try {
+                    const res = await fetch(`http://localhost:${port}/health`)
+                    if (res.ok) break
+                } catch { /* not ready yet */ }
+                await new Promise((resolve) => setTimeout(resolve, 100))
+            }
+
+            // First load — sets baseline
+            const r1 = await fetch(`http://localhost:${port}/sessions/httpload-test/capture`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: testPage })
+            })
+            expect(r1.status).toBe(200)
+            const g1 = await r1.json()
+            expect(g1.url).toBe(testPage)
+
+            // skipLoad with same URL → fast
+            const t0 = Date.now()
+            const r2 = await fetch(`http://localhost:${port}/sessions/httpload-test/capture`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: testPage, options: { skipLoad: true } })
+            })
+            const elapsedSkip = Date.now() - t0
+            expect(r2.status).toBe(200)
+            expect(elapsedSkip).toBeLessThan(400)
+
+            // noLoad with different URL → ignores URL, stays on current
+            const fakeUrl = 'https://should-not-load.invalid/'
+            const r3 = await fetch(`http://localhost:${port}/sessions/httpload-test/capture`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: fakeUrl, options: { noLoad: true } })
+            })
+            expect(r3.status).toBe(200)
+            const g3 = await r3.json()
+            expect(g3.url).toBe(testPage)
+        } finally {
+            await fetch(`http://localhost:${port}/shutdown`, { method: 'POST' }).catch(() => {})
             try { child.kill('SIGKILL') } catch { /* ignore */ }
         }
     }, 30000)

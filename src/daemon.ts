@@ -1,9 +1,12 @@
 import http from 'node:http'
+import fs from 'node:fs'
 import { URL } from 'node:url'
 import { BrowserSession } from './browser.js'
 import type { WaitCondition } from './browser.js'
 import { getProcessTreePids } from './process-tree.js'
-import type { NetworkRoute } from './types.js'
+import { TracingSession } from './tracing.js'
+import type { NetworkRoute, TraceReport } from './types.js'
+import type { Page } from 'playwright'
 
 export interface DaemonOptions {
     port: number
@@ -21,6 +24,7 @@ const STOP_TIMEOUT_MS = 5000
 export class ViewPrintDaemon {
     private server: http.Server | null = null
     private sessions = new Map<string, BrowserSession>()
+    private tracingSessions = new Map<string, TracingSession>()
     private port: number
     private idleTimeoutMs: number
     private idleCheckIntervalMs: number
@@ -159,6 +163,7 @@ export class ViewPrintDaemon {
     private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
         const url = new URL(req.url || '/', `http://localhost:${this.port}`)
         const pathParts = url.pathname.split('/').filter(Boolean)
+        const startTime = Date.now()
 
         this.markActivity()
 
@@ -195,7 +200,8 @@ export class ViewPrintDaemon {
                     body.viewport,
                     this.parseDepth(body.depth),
                     this.parseExpand(body.expand),
-                    this.parseQuery(body.query)
+                    this.parseQuery(body.query),
+                    this.parseLoadOptions(body.options)
                 )
                 this.sendJson(res, 200, graph)
                 return
@@ -209,7 +215,8 @@ export class ViewPrintDaemon {
                     body.viewport,
                     this.parseDepth(body.depth),
                     this.parseExpand(body.expand),
-                    this.parseQuery(body.query)
+                    this.parseQuery(body.query),
+                    this.parseLoadOptions(body.options)
                 )
                 this.sendJson(res, 200, snapshot)
                 return
@@ -534,6 +541,89 @@ export class ViewPrintDaemon {
                 return
             }
 
+            if (req.method === 'POST' && action === 'profile') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                if (body.enabled === false) {
+                    session.disableProfiling()
+                } else {
+                    session.enableProfiling()
+                }
+                this.sendJson(res, 200, {
+                    profiling: session.isProfilingEnabled(),
+                    timingsCount: session.getTimings().length
+                })
+                return
+            }
+
+            if (req.method === 'GET' && action === 'profile') {
+                const session = this.getExistingSession(sessionName)
+                this.sendJson(res, 200, {
+                    timings: session.getTimings(),
+                    report: session.getTimingsReport(),
+                    enabled: session.isProfilingEnabled()
+                })
+                return
+            }
+
+            if (req.method === 'DELETE' && action === 'profile') {
+                const session = this.getExistingSession(sessionName)
+                const cleared = session.clearTimings()
+                this.sendJson(res, 200, { cleared })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'trace' && subAction === 'start') {
+                const body = await this.readJson(req)
+                const session = await this.getOrCreateSession(sessionName)
+                const page = this.getSessionPage(session)
+                let tracing = this.tracingSessions.get(sessionName)
+                if (!tracing) {
+                    tracing = new TracingSession()
+                    this.tracingSessions.set(sessionName, tracing)
+                }
+                await tracing.start(page, { categories: body.categories })
+                this.sendJson(res, 200, {
+                    started: true,
+                    categories: tracing.getCategories()
+                })
+                return
+            }
+
+            if (req.method === 'POST' && action === 'trace' && subAction === 'stop') {
+                const body = await this.readJson(req)
+                const session = this.getExistingSession(sessionName)
+                const tracing = this.tracingSessions.get(sessionName)
+                if (!tracing || !tracing.isActive()) {
+                    this.sendJson(res, 400, { error: 'Tracing not active' })
+                    return
+                }
+                const page = this.getSessionPage(session)
+                const report = await tracing.stop(page, body.output)
+                this.tracingSessions.delete(sessionName)
+                this.sendJson(res, 200, { stopped: true, ...report })
+                return
+            }
+
+            if (req.method === 'GET' && action === 'trace' && subAction === 'report') {
+                const tracing = this.tracingSessions.get(sessionName)
+                if (!tracing) {
+                    this.sendJson(res, 200, {
+                        report: {
+                            path: '',
+                            durationMs: 0,
+                            eventCount: 0,
+                            sizeBytes: 0,
+                            categoryCounts: {},
+                            topEvents: []
+                        } satisfies TraceReport
+                    })
+                    return
+                }
+                this.sendJson(res, 200, { report: tracing.report() })
+                return
+            }
+
             if (req.method === 'GET' && action === undefined) {
                 const session = this.sessions.get(sessionName)
                 if (!session) {
@@ -550,6 +640,7 @@ export class ViewPrintDaemon {
                 if (session) {
                     await session.close()
                     this.sessions.delete(sessionName)
+                    this.tracingSessions.delete(sessionName)
                 }
                 this.sendJson(res, 200, { closed: true })
                 return
@@ -559,6 +650,8 @@ export class ViewPrintDaemon {
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error'
             this.sendJson(res, 500, { error: message })
+        } finally {
+            this.traceRequest(req, res, startTime, url.pathname)
         }
     }
 
@@ -607,7 +700,8 @@ export class ViewPrintDaemon {
                     optionsArg?.viewport as { width: number; height: number } | undefined,
                     this.parseDepth(optionsArg?.depth),
                     this.parseExpand(optionsArg?.expand),
-                    this.parseQuery(optionsArg?.query)
+                    this.parseQuery(optionsArg?.query),
+                    this.parseLoadOptions(optionsArg?.options)
                 )
             }
             case 'snapshot': {
@@ -617,7 +711,8 @@ export class ViewPrintDaemon {
                     optionsArg?.viewport as { width: number; height: number } | undefined,
                     this.parseDepth(optionsArg?.depth),
                     this.parseExpand(optionsArg?.expand),
-                    this.parseQuery(optionsArg?.query)
+                    this.parseQuery(optionsArg?.query),
+                    this.parseLoadOptions(optionsArg?.options)
                 )
             }
             case 'inspect':
@@ -703,19 +798,37 @@ export class ViewPrintDaemon {
         return value
     }
 
+    private parseLoadOptions(value: unknown): { skipLoad?: boolean, noLoad?: boolean } {
+        if (value === undefined || value === null) {
+            return {}
+        }
+        if (typeof value !== 'object') {
+            throw new Error('Invalid load options. Must be an object.')
+        }
+        const opts = value as Record<string, unknown>
+        const result: { skipLoad?: boolean, noLoad?: boolean } = {}
+        if (opts.skipLoad === true) {
+            result.skipLoad = true
+        }
+        if (opts.noLoad === true) {
+            result.noLoad = true
+        }
+        return result
+    }
+
     private normalizeCaptureArgs(
         args: unknown[]
-    ): [string | undefined, { viewport?: unknown; depth?: unknown; expand?: unknown; query?: unknown } | undefined] {
+    ): [string | undefined, { viewport?: unknown; depth?: unknown; expand?: unknown; query?: unknown; options?: unknown } | undefined] {
         if (args.length === 0) {
             return [undefined, undefined]
         }
         const [first, second] = args
         if (first && typeof first === 'object' && !Array.isArray(first)) {
-            const obj = first as { url?: unknown; viewport?: unknown; depth?: unknown; expand?: unknown; query?: unknown }
+            const obj = first as { url?: unknown; viewport?: unknown; depth?: unknown; expand?: unknown; query?: unknown; options?: unknown }
             return [obj.url as string | undefined, obj]
         }
         if (second && typeof second === 'object' && !Array.isArray(second)) {
-            return [first as string | undefined, second as { viewport?: unknown; depth?: unknown; expand?: unknown; query?: unknown }]
+            return [first as string | undefined, second as { viewport?: unknown; depth?: unknown; expand?: unknown; query?: unknown; options?: unknown }]
         }
         return [first as string | undefined, undefined]
     }
@@ -738,6 +851,44 @@ export class ViewPrintDaemon {
     private sendJson(res: http.ServerResponse, status: number, data: unknown): void {
         res.writeHead(status, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(data))
+    }
+
+    private getSessionPage(session: BrowserSession): Page {
+        const page = session.getPage()
+        if (!page) {
+            throw new Error('Session not started. Capture a page first.')
+        }
+        return page
+    }
+
+    private traceRequest(
+        req: http.IncomingMessage,
+        res: http.ServerResponse,
+        startTime: number,
+        pathname: string
+    ): void {
+        const durationMs = Date.now() - startTime
+        const record = {
+            method: req.method ?? '',
+            path: pathname,
+            status: res.statusCode,
+            durationMs,
+            timestamp: Date.now()
+        }
+        const line = JSON.stringify(record) + '\n'
+        try {
+            process.stderr.write(line)
+        } catch {
+            /* ignore */
+        }
+        const traceFile = process.env.VIEWPRINT_HTTP_TRACE_FILE
+        if (traceFile) {
+            try {
+                fs.appendFileSync(traceFile, line)
+            } catch {
+                /* ignore */
+            }
+        }
     }
 }
 

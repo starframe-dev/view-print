@@ -144,3 +144,28 @@ export interface PseudoElementData {
     computedStyles: Record<string, string>
     cascade: CascadeEntry[]
 }
+
+export interface ActionTiming {
+    action: string
+    durationMs: number
+    timestamp: number
+}
+
+export interface ActionReport {
+    count: number
+    totalMs: number
+    avgMs: number
+    p50Ms: number
+    p95Ms: number
+    p99Ms: number
+    byAction: Record<string, { count: number, totalMs: number, avgMs: number }>
+}
+
+export interface TraceReport {
+    path: string
+    durationMs: number
+    eventCount: number
+    sizeBytes: number
+    categoryCounts: Record<string, number>
+    topEvents: Array<{ name: string, dur: number, ts: number }>
+}

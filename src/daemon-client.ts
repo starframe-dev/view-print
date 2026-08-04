@@ -1,4 +1,4 @@
-import type { ElementNode, Graph, NetworkRoute, Snapshot } from './types.js'
+import type { ActionReport, ActionTiming, ElementNode, Graph, NetworkRoute, Snapshot, TraceReport } from './types.js'
 import type { Cookie } from 'playwright'
 import type { WaitCondition } from './browser.js'
 
@@ -25,6 +25,10 @@ export class DaemonClient {
         return fetch(`${this.baseUrl}${path}`)
     }
 
+    private async del(path: string): Promise<Response> {
+        return fetch(`${this.baseUrl}${path}`, { method: 'DELETE' })
+    }
+
     private async handleResponse(response: Response, action: string): Promise<unknown> {
         if (!response.ok) {
             throw new Error(`${action} failed: ${response.status} ${await response.text()}`)
@@ -47,14 +51,16 @@ export class DaemonClient {
         viewport?: { width: number; height: number },
         depth: number = 1,
         expand: Iterable<string> = [],
-        query?: string
+        query?: string,
+        options?: { skipLoad?: boolean, noLoad?: boolean }
     ): Promise<Graph> {
         const response = await this.post(`/sessions/${session}/capture`, {
             url,
             viewport,
             depth,
             expand: Array.from(expand),
-            query
+            query,
+            options
         })
         return this.handleResponse(response, 'Capture') as Promise<Graph>
     }
@@ -65,14 +71,16 @@ export class DaemonClient {
         viewport?: { width: number; height: number },
         depth: number = 1,
         expand: Iterable<string> = [],
-        query?: string
+        query?: string,
+        options?: { skipLoad?: boolean, noLoad?: boolean }
     ): Promise<Snapshot> {
         const response = await this.post(`/sessions/${session}/snapshot`, {
             url,
             viewport,
             depth,
             expand: Array.from(expand),
-            query
+            query,
+            options
         })
         return this.handleResponse(response, 'Snapshot') as Promise<Snapshot>
     }
@@ -291,6 +299,36 @@ export class DaemonClient {
     async close(session: string): Promise<void> {
         const response = await fetch(`${this.baseUrl}/sessions/${session}`, { method: 'DELETE' })
         await this.handleResponse(response, 'Close')
+    }
+
+    async setProfiling(session: string, enabled: boolean): Promise<{ profiling: boolean, timingsCount: number }> {
+        const response = await this.post(`/sessions/${session}/profile`, { enabled })
+        return this.handleResponse(response, 'SetProfiling') as Promise<{ profiling: boolean, timingsCount: number }>
+    }
+
+    async getProfile(session: string): Promise<{ timings: ActionTiming[], report: ActionReport, enabled: boolean }> {
+        const response = await this.get(`/sessions/${session}/profile`)
+        return this.handleResponse(response, 'GetProfile') as Promise<{ timings: ActionTiming[], report: ActionReport, enabled: boolean }>
+    }
+
+    async clearProfile(session: string): Promise<{ cleared: number }> {
+        const response = await this.del(`/sessions/${session}/profile`)
+        return this.handleResponse(response, 'ClearProfile') as Promise<{ cleared: number }>
+    }
+
+    async startTrace(session: string, categories?: string[]): Promise<{ started: boolean, categories: string[] }> {
+        const response = await this.post(`/sessions/${session}/trace/start`, { categories })
+        return this.handleResponse(response, 'StartTrace') as Promise<{ started: boolean, categories: string[] }>
+    }
+
+    async stopTrace(session: string, output?: string): Promise<{ stopped: boolean } & TraceReport> {
+        const response = await this.post(`/sessions/${session}/trace/stop`, { output })
+        return this.handleResponse(response, 'StopTrace') as Promise<{ stopped: boolean } & TraceReport>
+    }
+
+    async traceReport(session: string): Promise<{ report: TraceReport }> {
+        const response = await this.get(`/sessions/${session}/trace/report`)
+        return this.handleResponse(response, 'TraceReport') as Promise<{ report: TraceReport }>
     }
 }
 

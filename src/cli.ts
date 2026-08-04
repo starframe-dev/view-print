@@ -77,13 +77,50 @@ program
     .option('--depth <n>', 'Tree depth to expand (default 1). Use a large number for full expansion.', '1')
     .option('--expand <ids>', 'Comma-separated element ids to expand fully (e.g. e3,e5 or @e3,@e5), regardless of depth.')
     .option('--query <selector>', 'CSS selector. Matching elements become tree roots (combined with --expand).')
-    .action(async (url: string | undefined, options: { viewport: string; depth: string; expand?: string; query?: string }) => {
+    .option('--profile', 'Enable per-action profiling for this call and print summary to stderr')
+    .option('--trace <path>', 'Also capture Chrome performance trace and write to <path>')
+    .option('--skip-load', 'Skip page.goto if URL already matches the current page URL')
+    .option('--no-goto', 'Do not navigate at all; capture the current page (URL is ignored)')
+    .action(async (url: string | undefined, options: { viewport: string; depth: string; expand?: string; query?: string, profile?: boolean, trace?: string, skipLoad?: boolean, goto?: boolean }) => {
         const viewport = parseViewport(options.viewport)
         const depth = parseDepth(options.depth)
         const expand = parseExpand(options.expand)
         const client = await getClient()
-        const graph = await client.capture(getSessionName(), url, viewport, depth, expand, options.query)
-        console.log(JSON.stringify(graph, null, 2))
+        const session = getSessionName()
+        const captureOptions = { skipLoad: options.skipLoad === true, noLoad: options.goto === false }
+        if (captureOptions.noLoad && url) {
+            process.stderr.write(`# capture --no-goto: URL "${url}" is ignored; using current page\n`)
+        }
+        let tracingActive = false
+        try {
+            if (options.profile) {
+                await client.setProfiling(session, true)
+            }
+            if (options.trace) {
+                await client.startTrace(session)
+                tracingActive = true
+            }
+            const graph = await client.capture(session, url, viewport, depth, expand, options.query, captureOptions)
+            console.log(JSON.stringify(graph, null, 2))
+            if (options.profile) {
+                const profile = await client.getProfile(session)
+                process.stderr.write(`# profile: ${JSON.stringify(profile.report)}\n`)
+            }
+            if (options.trace) {
+                const traceResult = await client.stopTrace(session, options.trace)
+                process.stderr.write(`# trace: ${traceResult.eventCount} events, ${traceResult.sizeBytes} bytes -> ${traceResult.path}\n`)
+                tracingActive = false
+            }
+            if (options.profile) {
+                await client.clearProfile(session)
+                await client.setProfiling(session, false)
+            }
+        } catch (err) {
+            if (tracingActive) {
+                try { await client.stopTrace(session) } catch { /* ignore */ }
+            }
+            throw err
+        }
     })
 
 program
@@ -93,12 +130,18 @@ program
     .option('--depth <n>', 'Tree depth to expand (default 1). Use a large number for full expansion.', '1')
     .option('--expand <ids>', 'Comma-separated element ids to expand fully (e.g. e3,e5 or @e3,@e5), regardless of depth.')
     .option('--query <selector>', 'CSS selector. Matching elements become tree roots (combined with --expand).')
-    .action(async (url: string | undefined, options: { viewport: string; depth: string; expand?: string; query?: string }) => {
+    .option('--skip-load', 'Skip page.goto if URL already matches the current page URL')
+    .option('--no-goto', 'Do not navigate at all; snapshot the current page (URL is ignored)')
+    .action(async (url: string | undefined, options: { viewport: string; depth: string; expand?: string; query?: string, skipLoad?: boolean, goto?: boolean }) => {
         const viewport = parseViewport(options.viewport)
         const depth = parseDepth(options.depth)
         const expand = parseExpand(options.expand)
         const client = await getClient()
-        const snapshot = await client.snapshot(getSessionName(), url, viewport, depth, expand, options.query)
+        const snapshotOptions = { skipLoad: options.skipLoad === true, noLoad: options.goto === false }
+        if (snapshotOptions.noLoad && url) {
+            process.stderr.write(`# snapshot --no-goto: URL "${url}" is ignored; using current page\n`)
+        }
+        const snapshot = await client.snapshot(getSessionName(), url, viewport, depth, expand, options.query, snapshotOptions)
         console.log(JSON.stringify(snapshot, null, 2))
     })
 
@@ -579,6 +622,140 @@ program
     .description('Run as Model Context Protocol (MCP) server on stdio')
     .action(async () => {
         await runMcpServer()
+    })
+
+const traceCmd = program
+    .command('trace')
+    .description('Chrome DevTools Protocol performance tracing')
+
+traceCmd
+    .command('start')
+    .description('Start tracing on the session (must run capture/snapshot/etc. afterwards to generate events)')
+    .option('--categories <list>', 'Comma-separated trace categories (overrides default)')
+    .action(async (options: { categories?: string }) => {
+        const client = await getClient()
+        const categories = options.categories ? options.categories.split(',').map((c) => c.trim()) : undefined
+        const result = await client.startTrace(getSessionName(), categories)
+        console.log(JSON.stringify(result, null, 2))
+    })
+
+traceCmd
+    .command('stop')
+    .description('Stop tracing and write events to JSON file')
+    .option('--output <path>', 'Output path for trace JSON (default: ~/.viewprint/traces/trace-<timestamp>.json)')
+    .action(async (options: { output?: string }) => {
+        const client = await getClient()
+        const result = await client.stopTrace(getSessionName(), options.output)
+        console.log(JSON.stringify(result, null, 2))
+    })
+
+traceCmd
+    .command('run')
+    .description('Start trace, execute a batch of commands, stop trace. Useful for profiling actions WITHOUT navigation.')
+    .option('--actions <json>', 'JSON array of commands: [["click","@e3"],["fill","@e5","hi"]]. Or read from stdin if omitted.')
+    .option('--output <path>', 'Output path for trace JSON (default: ~/.viewprint/traces/trace-<timestamp>.json)')
+    .option('--categories <list>', 'Comma-separated trace categories (overrides default)')
+    .action(async (options: { actions?: string, output?: string, categories?: string }) => {
+        let actionsRaw = options.actions
+        if (!actionsRaw) {
+            // Read from stdin
+            const chunks: Buffer[] = []
+            for await (const chunk of process.stdin) {
+                chunks.push(chunk as Buffer)
+            }
+            actionsRaw = Buffer.concat(chunks).toString('utf8').trim()
+        }
+        if (!actionsRaw) {
+            console.error('trace run: --actions <json> is required (or pipe JSON via stdin)')
+            process.exit(1)
+        }
+        let commands: unknown[]
+        try {
+            commands = JSON.parse(actionsRaw)
+        } catch (err) {
+            console.error(`trace run: invalid JSON: ${(err as Error).message}`)
+            process.exit(1)
+        }
+        if (!Array.isArray(commands)) {
+            console.error('trace run: --actions must be a JSON array')
+            process.exit(1)
+        }
+
+        const client = await getClient()
+        const session = getSessionName()
+        const categories = options.categories ? options.categories.split(',').map((c) => c.trim()) : undefined
+
+        try {
+            const start = await client.startTrace(session, categories)
+            process.stderr.write(`# trace: started (${start.categories.length} categories)\n`)
+        } catch (err) {
+            console.error(`trace run: failed to start trace: ${(err as Error).message}`)
+            process.exit(1)
+        }
+
+        let traceResult: { eventCount: number, sizeBytes: number, path: string }
+        try {
+            const batchResult = await client.batch(session, commands)
+            // Emit each result on its own line for clarity
+            for (const result of batchResult.results) {
+                console.log(JSON.stringify(result))
+            }
+            traceResult = await client.stopTrace(session, options.output)
+            process.stderr.write(`# trace: ${traceResult.eventCount} events, ${traceResult.sizeBytes} bytes -> ${traceResult.path}\n`)
+        } catch (err) {
+            try { await client.stopTrace(session) } catch { /* ignore */ }
+            console.error(`trace run: ${(err as Error).message}`)
+            process.exit(1)
+        }
+    })
+
+traceCmd
+    .command('report')
+    .description('Get current trace report (without writing)')
+    .action(async () => {
+        const client = await getClient()
+        const result = await client.traceReport(getSessionName())
+        console.log(JSON.stringify(result, null, 2))
+    })
+
+const profileCmd = program
+    .command('profile')
+    .description('Per-action profiling of BrowserSession calls')
+
+profileCmd
+    .command('enable')
+    .description('Enable per-action timing collection for this session')
+    .action(async () => {
+        const client = await getClient()
+        const result = await client.setProfiling(getSessionName(), true)
+        console.log(JSON.stringify(result, null, 2))
+    })
+
+profileCmd
+    .command('disable')
+    .description('Disable per-action timing collection')
+    .action(async () => {
+        const client = await getClient()
+        const result = await client.setProfiling(getSessionName(), false)
+        console.log(JSON.stringify(result, null, 2))
+    })
+
+profileCmd
+    .command('show')
+    .description('Show collected timings and aggregate report')
+    .action(async () => {
+        const client = await getClient()
+        const result = await client.getProfile(getSessionName())
+        console.log(JSON.stringify(result, null, 2))
+    })
+
+profileCmd
+    .command('clear')
+    .description('Clear collected timings')
+    .action(async () => {
+        const client = await getClient()
+        const result = await client.clearProfile(getSessionName())
+        console.log(JSON.stringify(result, null, 2))
     })
 
 const daemon = program

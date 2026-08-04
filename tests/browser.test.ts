@@ -477,4 +477,69 @@ describe('BrowserSession', () => {
             await session.close()
         }
     })
+
+    it('capture with --no-load skips page.goto and captures current page', async () => {
+        const session = await createBrowserSession('no-load-test')
+        try {
+            await session.start()
+            // Manually navigate first
+            await session.capture(testPage, undefined, 1)
+            const beforeUrl = session.getLastGraph()?.url
+            expect(beforeUrl).toBe(testPage)
+            // Now capture with noLoad: should NOT trigger a goto even if URL is passed
+            const t0 = Date.now()
+            const graph = await session.capture(testPage, undefined, 1, new Set(), undefined, { noLoad: true })
+            const elapsed = Date.now() - t0
+            // No goto should be very fast (< 300ms). With goto it's 200-500ms+.
+            expect(elapsed).toBeLessThan(300)
+            expect(graph.url).toBe(beforeUrl)
+        } finally {
+            await session.close()
+        }
+    })
+
+    it('capture with --skip-load skips goto when URL matches', async () => {
+        const session = await createBrowserSession('skip-load-test')
+        try {
+            await session.start()
+            await session.capture(testPage)
+            // Same URL with skipLoad: no goto
+            const t0 = Date.now()
+            await session.capture(testPage, undefined, 1, new Set(), undefined, { skipLoad: true })
+            const elapsed = Date.now() - t0
+            expect(elapsed).toBeLessThan(300)
+        } finally {
+            await session.close()
+        }
+    })
+
+    it('capture with --skip-load still does goto when URL differs', async () => {
+        const session = await createBrowserSession('skip-load-differs-test')
+        try {
+            await session.start()
+            // First load
+            await session.capture(testPage)
+            // Different URL → goto happens (we can detect via state.url change)
+            const otherUrl = `data:text/html,${encodeURIComponent('<html><body>OTHER</body></html>')}`
+            await session.capture(otherUrl, undefined, 1, new Set(), undefined, { skipLoad: true })
+            expect(session.getLastGraph()?.url).toBe(otherUrl)
+        } finally {
+            await session.close()
+        }
+    })
+
+    it('capture with --no-load ignores URL and uses current page', async () => {
+        const session = await createBrowserSession('no-load-ignore-test')
+        try {
+            await session.start()
+            await session.capture(testPage)
+            const beforeUrl = session.getLastGraph()?.url
+            // Pass a different URL with noLoad: it should be IGNORED
+            const fakeUrl = 'https://should-not-load.example.com/'
+            await session.capture(fakeUrl, undefined, 1, new Set(), undefined, { noLoad: true })
+            expect(session.getLastGraph()?.url).toBe(beforeUrl)
+        } finally {
+            await session.close()
+        }
+    })
 })
