@@ -1043,6 +1043,8 @@ function buildSnapshotTree(
                 role: child.role,
                 name: child.name,
                 text: child.text,
+                id: child.attributes.id,
+                className: child.attributes.class,
                 boundingBox: child.boundingBox,
                 childrenCount: child.childrenCount,
                 children: expandedChildren
@@ -1055,6 +1057,8 @@ function buildSnapshotTree(
             result.push({
                 ref: child.id,
                 tag: child.tag,
+                id: child.attributes.id,
+                className: child.attributes.class,
                 boundingBox: child.boundingBox,
                 childrenCount: child.childrenCount,
                 children: []

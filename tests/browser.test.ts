@@ -251,6 +251,51 @@ describe('BrowserSession', () => {
         }
     })
 
+    it('snapshot includes HTML id and className for elements with these attributes', async () => {
+        const session = await createBrowserSession('test-snapshot-classid')
+        try {
+            const taggedPage = `data:text/html,${encodeURIComponent(`
+                <!DOCTYPE html>
+                <html>
+                <body>
+                    <header id="page-header" class="site-header dark">
+                        <h1 id="title">Hello</h1>
+                    </header>
+                    <div>plain</div>
+                </body>
+                </html>
+            `)}`
+            const snapshot = await session.snapshot(taggedPage, { width: 1280, height: 720 }, 9999)
+
+            // Walk the snapshot tree to find by tag
+            function findByTag(nodes: typeof snapshot.tree, tag: string): typeof snapshot.tree[number] | undefined {
+                for (const n of nodes) {
+                    if (n.tag === tag) return n
+                    const inChild = findByTag(n.children, tag)
+                    if (inChild) return inChild
+                }
+                return undefined
+            }
+
+            const header = findByTag(snapshot.tree, 'header')
+            expect(header).toBeDefined()
+            expect(header!.id).toBe('page-header')
+            expect(header!.className).toBe('site-header dark')
+
+            const h1 = findByTag(snapshot.tree, 'h1')
+            expect(h1).toBeDefined()
+            expect(h1!.id).toBe('title')
+
+            // Element without id/class: fields are undefined (omitted in JSON)
+            const plainDiv = findByTag(snapshot.tree, 'div')
+            expect(plainDiv).toBeDefined()
+            expect(plainDiv!.id).toBeUndefined()
+            expect(plainDiv!.className).toBeUndefined()
+        } finally {
+            await session.close()
+        }
+    })
+
     it('fills input and evaluates JavaScript', async () => {
         const session = await createBrowserSession('test-actions')
         try {

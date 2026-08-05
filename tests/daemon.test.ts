@@ -111,6 +111,38 @@ describe('ViewPrintDaemon', () => {
         expect(container!.children).toEqual([])
     })
 
+    it('snapshot HTTP API includes id and className top-level fields', async () => {
+        const taggedPage = `data:text/html,${encodeURIComponent(`
+            <!DOCTYPE html>
+            <html>
+            <body>
+                <header id="page-header" class="site-header dark">
+                    <h1 id="title">Hello</h1>
+                </header>
+            </body>
+            </html>
+        `)}`
+        const snapshot = await client.snapshot('test-snapshot-classid-http', taggedPage, undefined, 9999)
+
+        function findByTag(nodes: typeof snapshot.tree, tag: string): typeof snapshot.tree[number] | undefined {
+            for (const n of nodes) {
+                if (n.tag === tag) return n
+                const inChild = findByTag(n.children, tag)
+                if (inChild) return inChild
+            }
+            return undefined
+        }
+
+        const header = findByTag(snapshot.tree, 'header')
+        expect(header).toBeDefined()
+        expect(header!.id).toBe('page-header')
+        expect(header!.className).toBe('site-header dark')
+
+        const h1 = findByTag(snapshot.tree, 'h1')
+        expect(h1).toBeDefined()
+        expect(h1!.id).toBe('title')
+    })
+
     it('executes batch commands', async () => {
         const results = await client.batch('test-daemon', [
             ['capture', testPage],

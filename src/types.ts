@@ -75,6 +75,8 @@ export interface SnapshotNode {
     role?: string
     name?: string
     text?: string
+    id?: string
+    className?: string
     boundingBox: BoundingBox
     childrenCount: number
     children: SnapshotNode[]
