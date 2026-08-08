@@ -81,13 +81,18 @@ program
     .option('--trace <path>', 'Also capture Chrome performance trace and write to <path>')
     .option('--skip-load', 'Skip page.goto if URL already matches the current page URL')
     .option('--no-goto', 'Do not navigate at all; capture the current page (URL is ignored)')
-    .action(async (url: string | undefined, options: { viewport: string; depth: string; expand?: string; query?: string, profile?: boolean, trace?: string, skipLoad?: boolean, goto?: boolean }) => {
+    .option('--no-headless', 'Show Chromium window for this session')
+    .action(async (url: string | undefined, options: { viewport: string; depth: string; expand?: string; query?: string, profile?: boolean, trace?: string, skipLoad?: boolean, goto?: boolean, headless?: boolean }) => {
         const viewport = parseViewport(options.viewport)
         const depth = parseDepth(options.depth)
         const expand = parseExpand(options.expand)
         const client = await getClient()
         const session = getSessionName()
-        const captureOptions = { skipLoad: options.skipLoad === true, noLoad: options.goto === false }
+        const captureOptions = {
+            skipLoad: options.skipLoad === true,
+            noLoad: options.goto === false,
+            noHeadless: options.headless === false
+        }
         if (captureOptions.noLoad && url) {
             process.stderr.write(`# capture --no-goto: URL "${url}" is ignored; using current page\n`)
         }

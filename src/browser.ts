@@ -16,8 +16,17 @@ export interface WaitCondition {
     fn?: string
 }
 
+export interface BrowserSessionOptions {
+    headless?: boolean
+}
+
+export function getBrowserLaunchOptions(options: BrowserSessionOptions = {}): { headless: boolean } {
+    return { headless: options.headless ?? true }
+}
+
 export class BrowserSession {
     private name: string
+    private headless: boolean
     private server: BrowserServer | null = null
     private browser: Browser | null = null
     private context: BrowserContext | null = null
@@ -33,15 +42,20 @@ export class BrowserSession {
     private profiling = false
     private timings: ActionTiming[] = []
 
-    constructor(name: string) {
+    constructor(name: string, options: BrowserSessionOptions = {}) {
         this.name = name
+        this.headless = options.headless ?? true
         this.state = loadSession(name)
+    }
+
+    isHeadless(): boolean {
+        return this.headless
     }
 
     async start(): Promise<void> {
         // Use launchServer + connect so we have access to the browser process PID.
         // This is required to guarantee chromium cleanup on daemon exit.
-        this.server = await chromium.launchServer({ headless: true })
+        this.server = await chromium.launchServer(getBrowserLaunchOptions({ headless: this.headless }))
         this.browserPid = this.server.process().pid ?? null
         this.userDataDir = extractUserDataDir(this.server.process().spawnargs)
         this.browser = await chromium.connect(this.server.wsEndpoint())
@@ -1088,8 +1102,8 @@ function extractUserDataDir(spawnArgs: string[] | undefined): string | null {
     return null
 }
 
-export async function createBrowserSession(name: string): Promise<BrowserSession> {
-    const session = new BrowserSession(name)
+export async function createBrowserSession(name: string, options: BrowserSessionOptions = {}): Promise<BrowserSession> {
+    const session = new BrowserSession(name, options)
     await session.start()
     return session
 }

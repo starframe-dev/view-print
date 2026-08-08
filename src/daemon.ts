@@ -194,7 +194,9 @@ export class ViewPrintDaemon {
 
             if (req.method === 'POST' && action === 'capture') {
                 const body = await this.readJson(req)
-                const session = await this.getOrCreateSession(sessionName)
+                const session = await this.getOrCreateSession(sessionName, {
+                    noHeadless: this.parseNoHeadless(body.noHeadless)
+                })
                 const graph = await session.capture(
                     body.url,
                     body.viewport,
@@ -655,13 +657,13 @@ export class ViewPrintDaemon {
         }
     }
 
-    private async getOrCreateSession(name: string): Promise<BrowserSession> {
+    private async getOrCreateSession(name: string, options: { noHeadless?: boolean } = {}): Promise<BrowserSession> {
         const existing = this.sessions.get(name)
         if (existing) {
             return existing
         }
 
-        const session = new BrowserSession(name)
+        const session = new BrowserSession(name, { headless: !options.noHeadless })
         await session.start()
         this.sessions.set(name, session)
         return session
@@ -794,6 +796,16 @@ export class ViewPrintDaemon {
         }
         if (typeof value !== 'string') {
             throw new Error('Invalid query. Must be a CSS selector string.')
+        }
+        return value
+    }
+
+    private parseNoHeadless(value: unknown): boolean {
+        if (value === undefined || value === null) {
+            return false
+        }
+        if (typeof value !== 'boolean') {
+            throw new Error('Invalid noHeadless. Must be a boolean.')
         }
         return value
     }

@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawn, execSync } from 'node:child_process'
 import path from 'node:path'
+import { BrowserSession } from '../src/browser.js'
 import { ViewPrintDaemon } from '../src/daemon.js'
 import { DaemonClient } from '../src/daemon-client.js'
 import type { CaptureNode, ElementNode } from '../src/types.js'
@@ -82,6 +83,29 @@ describe('ViewPrintDaemon', () => {
         const node = Object.values(flat)[0]
         expect('computedStyles' in node).toBe(false)
         expect('cascade' in node).toBe(false)
+    })
+
+    it('creates a headed session only when capture requests no-headless', async () => {
+        const headlessModes: boolean[] = []
+        const startSpy = vi.spyOn(BrowserSession.prototype, 'start').mockImplementation(async function (this: BrowserSession) {
+            headlessModes.push(this.isHeadless())
+        })
+        const captureSpy = vi.spyOn(BrowserSession.prototype, 'capture').mockResolvedValue({
+            url: testPage,
+            viewport: { width: 1280, height: 720 },
+            tree: []
+        })
+
+        try {
+            await client.capture('headed-session', testPage, undefined, 1, [], undefined, { noHeadless: true })
+            await client.capture('headed-session', testPage)
+
+            expect(headlessModes).toEqual([false])
+            expect(captureSpy).toHaveBeenCalledTimes(2)
+        } finally {
+            startSpy.mockRestore()
+            captureSpy.mockRestore()
+        }
     })
 
     it('respects depth parameter via HTTP API', async () => {

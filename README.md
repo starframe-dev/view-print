@@ -9,9 +9,9 @@ AI-инструмент для извлечения точного графа в
 
 ## Возможности
 
-- 🗺️ **Capture** — облегчённое дерево элементов `<body>`, раскрытое до `--depth` (default 1, свёрнутые ветки показывают `childrenCount`). `--expand <ids>` задаёт альтернативные корни (body не показывается).
+- 🗺️ **Capture** — облегчённое дерево элементов `<body>`, раскрытое до `--depth` (default 1, свёрнутые ветки показывают `childrenCount`). `--expand <ids>` задаёт альтернативные корни (body не показывается). Флаги `--skip-load` (пропустить `goto` если URL совпадает), `--no-goto` (capture на текущей странице, URL игнорируется) и `--no-headless` (показать окно Chromium для новой сессии). Опционально `--profile` для per-action timing и `--trace <path>` для Chrome perf trace.
 - 🔍 **Inspect** — полные `computedStyles`, `cascade` и псевдо-элементы для конкретного узла.
-- 🌳 **Snapshot** — accessibility tree с `@e1`, `@e2` refs, `--depth` и `--expand`.
+- 🌳 **Snapshot** — accessibility tree с `@e1`, `@e2` refs, `--depth` и `--expand`. Узлы с HTML `id`/`class` содержат одноимённые top-level поля (`id`, `className`).
 - 🎯 **Actions** — `click`, `fill`, `type`, `hover`, `focus`, `press`, `scroll`, `scrollIntoView`, `wait`, `eval`.
 - 📜 **Batch** — JSON-массив команд за один запрос.
 - 🌐 **Network** — отслеживание, HAR, mock `route`/`unroute`.
@@ -22,6 +22,7 @@ AI-инструмент для извлечения точного графа в
 - 🤖 **MCP server** — stdio-сервер для интеграции с AI-агентами.
 - 🔔 **Dialogs** — обработка `alert`/`confirm`/`prompt`.
 - 🔄 **Diff** — сравнение графов между вызовами.
+- 📊 **Profiling** — Chrome perf trace (CDP `Tracing`), per-action timing (count/avg/p50/p95/p99), HTTP middleware (JSON-lines). Команды `viewprint trace {start|stop|report|run}`, `viewprint profile {enable|disable|show|clear}`.
 
 ## Установка
 
@@ -69,6 +70,7 @@ viewprint -s mypage capture https://example.com --expand e3,e5   # expand specif
 viewprint -s mypage capture https://example.com --depth 1 --expand e3   # top level + subtree
 viewprint -s mypage capture https://example.com --query "button"      # all buttons as roots
 viewprint -s mypage capture https://example.com --query ".product-card" --depth 3   # cards + 3 levels
+viewprint -s mypage capture https://example.com --no-headless   # show Chromium window for this session
 viewprint -s mypage capture --viewport 1920x1080
 viewprint -s mypage snapshot https://example.com
 viewprint -s mypage snapshot https://example.com --depth 9999   # full tree
@@ -180,7 +182,7 @@ viewprint mcp
 
 **Capture-узел** содержит: `id`, `parentId`, `tag`, `role`, `name`, `attributes`, `text`, `boundingBox`, `childrenCount`, `children`.
 
-**Snapshot-узел** содержит то же, но `attributes` нет, а `id` называется `ref`.
+**Snapshot-узел** содержит: `ref` (наш `id`), `tag`, `role`, `name`, `text`, `id` (HTML-атрибут, если есть), `className` (HTML-атрибут, если есть), `boundingBox`, `childrenCount`, `children`. Поля `id`/`className` — top-level, не внутри attributes, для удобного построения CSS-селекторов.
 
 **Полный узел (`inspect`)** дополнительно содержит: `computedStyles` (только non-`user-agent`), `cascade` (`inline`/`stylesheet`/`inherited`), `pseudo.before`, `pseudo.after`.
 
@@ -210,6 +212,74 @@ viewprint mcp
 
 Cookies восстанавливаются через Playwright `storageState` (только cookies, без IndexedDB). localStorage / sessionStorage восстанавливаются через `page.evaluate` после `goto`.
 
+## Profiling
+
+Три независимых подсистемы для диагностики производительности.
+
+### Chrome perf trace (CDP)
+
+`viewprint trace start` оборачивает `capture` в CDP `Tracing.start`/`Tracing.end` и пишет JSON в формате Chrome DevTools Trace Event Format. Открой в `chrome://tracing` или `ui.perfetto.dev`.
+
+```bash
+viewprint -s X trace start [--categories c1,c2,...]
+viewprint -s X capture URL                # действия между start и stop
+viewprint -s X trace stop --output trace.json
+```
+
+### Per-action timing
+
+`viewprint profile enable` измеряет длительность каждого action в `BrowserSession` (capture/click/fill/wait/eval/...). Возвращает count, totalMs, avgMs, p50/p95/p99, byAction.
+
+```bash
+viewprint -s X profile enable
+viewprint -s X capture URL
+viewprint -s X profile show
+viewprint -s X profile clear
+viewprint -s X profile disable
+```
+
+### Удобные флаги на `capture`
+
+```bash
+viewprint -s X capture URL --profile               # per-action timing в stderr
+viewprint -s X capture URL --trace /tmp/page.json  # Chrome perf trace в файл
+viewprint -s X capture URL --profile --trace /tmp/page.json  # оба вместе
+```
+
+### Skip / no navigation
+
+Полезно с профилированием — чтобы измерять только действие, а не navigation.
+
+```bash
+viewprint -s X capture URL --skip-load    # не делать goto если URL уже совпадает
+viewprint -s X capture URL --no-goto      # capture на текущей странице, URL игнорируется
+viewprint -s X capture URL --no-headless  # показать Chromium; действует при создании новой сессии
+```
+
+### Видимый режим Chromium
+
+`--no-headless` запускает видимое окно Chromium только при создании новой сессии. Без флага Chromium запускается headless. Если сессия уже существует, её режим не меняется; для смены режима закрой сессию и создай её снова:
+
+```bash
+viewprint -s X capture https://example.com --no-headless
+viewprint -s X close
+```
+
+Флаг относится только к `capture` и не меняет режим других сессий.
+
+### Trace без capture: `trace run`
+
+Оборачивает произвольные команды в trace session без `capture`.
+
+```bash
+viewprint -s X trace run --actions '[["tabs","new","https://example.com"],["wait",{"text":"Loaded"}],["click","@e3"]]'
+echo '[["click","@e3"],["fill","@e5","hello"]]' | viewprint -s X trace run
+```
+
+### HTTP middleware
+
+Каждый HTTP-запрос к daemon автоматически логируется как JSON-line в stderr. Опционально писать в файл через env `VIEWPRINT_HTTP_TRACE_FILE`.
+
 ## Архитектура
 
 ```
@@ -222,6 +292,7 @@ src/
 ├── browser.ts       # BrowserSession (Playwright)
 ├── extractor.ts     # extractSnapshotData, inspectElement (page.evaluate)
 ├── graph.ts         # buildGraph
+├── tracing.ts       # Chrome perf trace (CDP Tracing)
 ├── session.ts       # State persistence (FS JSON)
 ├── diff.ts          # diffGraphs
 ├── mcp.ts           # MCP server (stdio, JSON-RPC 2.0)
@@ -255,6 +326,10 @@ src/
 | DELETE | `/sessions/:name` | Close session |
 | GET | `/health` | Health check |
 | POST | `/shutdown` | Shutdown daemon |
+| POST/GET/DELETE | `/sessions/:name/profile` | Per-action profiling enable/get/clear |
+| POST | `/sessions/:name/trace/start` | Start Chrome perf trace |
+| POST | `/sessions/:name/trace/stop` | Stop trace + write JSON file |
+| GET | `/sessions/:name/trace/report` | Trace report (summary) |
 
 ## Разработка
 
@@ -268,8 +343,12 @@ pnpm test       # vitest run
 
 - `tests/graph.test.ts` — `buildGraph` unit tests
 - `tests/session.test.ts` — state load/save с `memfs`
+- `tests/process-tree.test.ts` — `process-tree.ts` unit tests
+- `tests/tracing.test.ts` — `TracingSession` unit tests
 - `tests/browser.test.ts` — `BrowserSession` интеграционные (Playwright + http server)
 - `tests/daemon.test.ts` — `ViewPrintDaemon` HTTP API
+
+**87/87 тестов passing**.
 
 ### Принципы
 
@@ -295,6 +374,10 @@ pnpm test       # vitest run
 ### Click зависает на data: URL
 
 `waitForLoadState('networkidle')` не срабатывает на `data:`. Решение: `page.waitForTimeout(100)`.
+
+### Висящие chrome-headless-shell после остановки
+
+`BrowserSession.close()` использует тройную страховку: graceful Playwright close → `killProcessTree(browserPid)` (если Playwright отдал PID через `launchServer`) → `killChromeProcessesByUserDataDir(dir)` (поиск по `ps | grep --user-data-dir`). Дополнительно `daemon.stop()` вызывает `killRemainingDescendants()` (SIGKILL всем потомкам демона через `pgrep -P` рекурсивно), а `daemon-entry.ts` `process.on('exit')` синхронно SIGKILL-ит потомков если event loop умер до async cleanup.
 
 ## Лицензия
 

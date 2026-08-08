@@ -1,7 +1,7 @@
 import http from 'node:http'
 import { AddressInfo } from 'node:net'
 import { describe, expect, it } from 'vitest'
-import { createBrowserSession } from '../src/browser.js'
+import { BrowserSession, createBrowserSession, getBrowserLaunchOptions } from '../src/browser.js'
 import type { CaptureNode, ElementNode } from '../src/types.js'
 
 const testPage = `data:text/html,${encodeURIComponent(`
@@ -58,6 +58,13 @@ function findByAttribute(tree: CaptureNode[], attr: string, value: string): Capt
 }
 
 describe('BrowserSession', () => {
+    it('defaults to headless and supports headed launch configuration', () => {
+        expect(new BrowserSession('headless-default').isHeadless()).toBe(true)
+        expect(new BrowserSession('headed-session', { headless: false }).isHeadless()).toBe(false)
+        expect(getBrowserLaunchOptions()).toEqual({ headless: true })
+        expect(getBrowserLaunchOptions({ headless: false })).toEqual({ headless: false })
+    })
+
     it('captures lightweight layout tree from a page at depth=1', async () => {
         const session = await createBrowserSession('test-browser')
         try {

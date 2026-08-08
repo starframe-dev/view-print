@@ -52,7 +52,7 @@ export class DaemonClient {
         depth: number = 1,
         expand: Iterable<string> = [],
         query?: string,
-        options?: { skipLoad?: boolean, noLoad?: boolean }
+        options?: { skipLoad?: boolean, noLoad?: boolean, noHeadless?: boolean }
     ): Promise<Graph> {
         const response = await this.post(`/sessions/${session}/capture`, {
             url,
@@ -60,7 +60,8 @@ export class DaemonClient {
             depth,
             expand: Array.from(expand),
             query,
-            options
+            options,
+            noHeadless: options?.noHeadless
         })
         return this.handleResponse(response, 'Capture') as Promise<Graph>
     }
