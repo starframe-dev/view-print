@@ -61,6 +61,9 @@ export class BrowserSession {
         this.browser = await chromium.connect(this.server.wsEndpoint())
         this.context = await this.browser.newContext({ storageState: this.buildStorageState() })
         this.page = await this.context.newPage()
+        if (this.state.viewport) {
+            await this.page.setViewportSize(this.state.viewport)
+        }
     }
 
     async capture(
@@ -97,6 +100,7 @@ export class BrowserSession {
 
             const rawData = await this.page.evaluate(extractSnapshotData)
             const currentViewport = this.page.viewportSize() || { width: 0, height: 0 }
+            this.state.viewport = currentViewport
 
             const expandedIds = new Set(expand)
             if (query) {
@@ -1024,12 +1028,32 @@ export class BrowserSession {
         this.state.cookies = (await this.context.cookies()) as SessionState['cookies']
 
         try {
-            this.state.localStorage = await this.page.evaluate(() =>
-                Object.fromEntries(Object.entries(window.localStorage))
-            )
-            this.state.sessionStorage = await this.page.evaluate(() =>
-                Object.fromEntries(Object.entries(window.sessionStorage))
-            )
+            this.state.localStorage = await this.page.evaluate(() => {
+                const result: Record<string, string> = {}
+                for (let i = 0; i < window.localStorage.length; i++) {
+                    const key = window.localStorage.key(i)
+                    if (key !== null) {
+                        const value = window.localStorage.getItem(key)
+                        if (value !== null) {
+                            result[key] = value
+                        }
+                    }
+                }
+                return result
+            })
+            this.state.sessionStorage = await this.page.evaluate(() => {
+                const result: Record<string, string> = {}
+                for (let i = 0; i < window.sessionStorage.length; i++) {
+                    const key = window.sessionStorage.key(i)
+                    if (key !== null) {
+                        const value = window.sessionStorage.getItem(key)
+                        if (value !== null) {
+                            result[key] = value
+                        }
+                    }
+                }
+                return result
+            })
         } catch {
             this.state.localStorage = {}
             this.state.sessionStorage = {}

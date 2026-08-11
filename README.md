@@ -80,6 +80,17 @@ viewprint -s mypage status
 viewprint -s mypage close
 ```
 
+### Управление сохранённым state
+
+```bash
+viewprint -s old session rename new
+viewprint -s X session export --output session.json
+viewprint -s X session import session.json
+viewprint -s X session import session.json --force
+```
+
+`rename` и `import` требуют закрытой сессии. `export` можно выполнять при открытом браузере. JSON не шифруется и может содержать секреты из cookies и storage.
+
 ### Actions
 
 ```bash
@@ -204,13 +215,14 @@ viewprint mcp
 {
   "name": "mypage",
   "url": "https://example.com",
+  "viewport": { "width": 1280, "height": 720 },
   "cookies": [...],
   "localStorage": { "key": "value" },
   "sessionStorage": { "key": "value" }
 }
 ```
 
-Cookies восстанавливаются через Playwright `storageState` (только cookies, без IndexedDB). localStorage / sessionStorage восстанавливаются через `page.evaluate` после `goto`.
+Cookies восстанавливаются через Playwright `storageState` (только cookies, без IndexedDB). localStorage / sessionStorage восстанавливаются через `page.evaluate` после `goto`. Viewport восстанавливается при запуске сессии.
 
 ## Profiling
 
@@ -330,6 +342,9 @@ src/
 | POST | `/sessions/:name/trace/start` | Start Chrome perf trace |
 | POST | `/sessions/:name/trace/stop` | Stop trace + write JSON file |
 | GET | `/sessions/:name/trace/report` | Trace report (summary) |
+| POST | `/sessions/:name/rename` | Rename saved state (closed session only) |
+| GET | `/sessions/:name/export` | Export saved state |
+| POST | `/sessions/:name/import` | Import saved state (`force` optional) |
 
 ## Разработка
 

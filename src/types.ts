@@ -91,6 +91,7 @@ export interface Snapshot {
 export interface SessionState {
     name: string
     url?: string
+    viewport?: { width: number; height: number }
     cookies: Array<{ name: string; value: string; domain: string; path: string; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: 'Strict' | 'Lax' | 'None' }>
     localStorage: Record<string, string>
     sessionStorage: Record<string, string>

@@ -295,6 +295,36 @@ describe('ViewPrintDaemon', () => {
         await expect(client.status('test-daemon')).rejects.toThrow()
     })
 
+    it('exports, imports and renames closed session state', async () => {
+        const suffix = Date.now().toString()
+        const source = `state-source-${suffix}`
+        const imported = `state-imported-${suffix}`
+        const renamed = `state-renamed-${suffix}`
+        const active = `state-active-${suffix}`
+
+        await client.capture(source, testPage, { width: 1440, height: 900 })
+        await client.close(source)
+        const exported = await client.exportSession(source)
+        expect(exported.name).toBe(source)
+        expect(exported.viewport).toEqual({ width: 1440, height: 900 })
+
+        await client.importSession(imported, exported, true)
+        await expect(client.importSession(imported, exported)).rejects.toThrow('Use --force to overwrite')
+        const importedState = await client.exportSession(imported)
+        expect(importedState.name).toBe(imported)
+        expect(importedState.url).toBe(testPage)
+
+        await client.renameSession(imported, renamed)
+        const renamedState = await client.exportSession(renamed)
+        expect(renamedState.name).toBe(renamed)
+        expect(renamedState.viewport).toEqual({ width: 1440, height: 900 })
+
+        await client.capture(active, testPage)
+        const activeState = await client.exportSession(active)
+        await expect(client.renameSession(active, `${active}-renamed`)).rejects.toThrow('open session')
+        await expect(client.importSession(active, activeState)).rejects.toThrow('open session')
+    })
+
     it('updates lastActivityAt on each request', async () => {
         const before = daemon.getLastActivityAt()
         // Wait to ensure timestamp difference

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import fs from 'node:fs'
 import { Command } from 'commander'
 import { createDaemonClient } from './daemon-client.js'
 import {
@@ -11,7 +12,7 @@ import {
 } from './daemon-process.js'
 import { runMcpServer } from './mcp.js'
 import type { WaitCondition } from './browser.js'
-import type { NetworkRoute } from './types.js'
+import type { NetworkRoute, SessionState } from './types.js'
 
 const program = new Command()
 
@@ -611,6 +612,53 @@ program
         const client = await getClient()
         const status = await client.status(getSessionName())
         console.log(JSON.stringify(status, null, 2))
+    })
+
+const sessionCmd = program
+    .command('session')
+    .description('Manage saved session state')
+
+sessionCmd
+    .command('rename <newName>')
+    .description('Rename saved state; the session must be closed')
+    .action(async (newName: string) => {
+        const client = await getClient()
+        const result = await client.renameSession(getSessionName(), newName)
+        console.log(JSON.stringify(result, null, 2))
+    })
+
+sessionCmd
+    .command('export')
+    .description('Export complete session state as JSON')
+    .option('--output <path>', 'Output JSON path; print to stdout if omitted')
+    .action(async (options: { output?: string }) => {
+        const client = await getClient()
+        const state = await client.exportSession(getSessionName())
+        const content = `${JSON.stringify(state, null, 2)}\n`
+        if (options.output) {
+            fs.writeFileSync(options.output, content)
+            console.log(JSON.stringify({ exported: true, path: options.output }, null, 2))
+        } else {
+            process.stdout.write(content)
+        }
+    })
+
+sessionCmd
+    .command('import <path>')
+    .description('Import complete session state from JSON')
+    .option('--force', 'Overwrite an existing saved session')
+    .action(async (filePath: string, options: { force?: boolean }) => {
+        let state: unknown
+        try {
+            state = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error'
+            throw new Error(`Failed to read session state: ${message}`)
+        }
+
+        const client = await getClient()
+        const result = await client.importSession(getSessionName(), state as SessionState, options.force === true)
+        console.log(JSON.stringify(result, null, 2))
     })
 
 program

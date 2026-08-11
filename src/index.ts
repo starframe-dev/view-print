@@ -1,7 +1,17 @@
 export { BrowserSession, createBrowserSession } from './browser.js'
 export { buildGraph } from './graph.js'
 export { extractSnapshotData, inspectElement } from './extractor.js'
-export { deleteSession, listSessions, loadSession, saveSession } from './session.js'
+export {
+    deleteSession,
+    exportSession,
+    importSession,
+    listSessions,
+    loadSession,
+    normalizeSessionState,
+    renameSession,
+    saveSession,
+    sessionExists
+} from './session.js'
 export { ViewPrintDaemon, startDaemon } from './daemon.js'
 export { DaemonClient, createDaemonClient } from './daemon-client.js'
 export { runMcpServer } from './mcp.js'

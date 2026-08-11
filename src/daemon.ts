@@ -4,6 +4,7 @@ import { URL } from 'node:url'
 import { BrowserSession } from './browser.js'
 import type { WaitCondition } from './browser.js'
 import { getProcessTreePids } from './process-tree.js'
+import { exportSession, importSession, normalizeSessionState, renameSession, sessionExists } from './session.js'
 import { TracingSession } from './tracing.js'
 import type { NetworkRoute, TraceReport } from './types.js'
 import type { Page } from 'playwright'
@@ -191,6 +192,44 @@ export class ViewPrintDaemon {
             const action = pathParts[2]
             const subAction = pathParts[3]
             const subAction2 = pathParts[4]
+
+            if (req.method === 'POST' && action === 'rename') {
+                const body = await this.readJson(req)
+                if (this.sessions.has(sessionName)) {
+                    throw new Error('Cannot rename an open session. Close the browser first.')
+                }
+                const newName = this.parseSessionName(body.newName)
+                if (this.sessions.has(newName)) {
+                    throw new Error(`Session is open: ${newName}. Close the browser first.`)
+                }
+                renameSession(sessionName, newName)
+                this.sendJson(res, 200, { renamed: true, oldName: sessionName, newName })
+                return
+            }
+
+            if (req.method === 'GET' && action === 'export') {
+                const activeSession = this.sessions.get(sessionName)
+                if (!activeSession && !sessionExists(sessionName)) {
+                    throw new Error(`Session not found: ${sessionName}`)
+                }
+                const state = activeSession ? activeSession.getState() : exportSession(sessionName)
+                this.sendJson(res, 200, state)
+                return
+            }
+
+            if (req.method === 'POST' && action === 'import') {
+                const body = await this.readJson(req)
+                if (this.sessions.has(sessionName)) {
+                    throw new Error('Cannot import into an open session. Close the browser first.')
+                }
+                if (body.force !== undefined && typeof body.force !== 'boolean') {
+                    throw new Error('Invalid force. Must be a boolean.')
+                }
+                const state = normalizeSessionState(body.state, sessionName)
+                importSession(sessionName, state, body.force === true)
+                this.sendJson(res, 200, { imported: true, session: sessionName })
+                return
+            }
 
             if (req.method === 'POST' && action === 'capture') {
                 const body = await this.readJson(req)
@@ -806,6 +845,13 @@ export class ViewPrintDaemon {
         }
         if (typeof value !== 'boolean') {
             throw new Error('Invalid noHeadless. Must be a boolean.')
+        }
+        return value
+    }
+
+    private parseSessionName(value: unknown): string {
+        if (typeof value !== 'string' || value.length === 0 || value === '.' || value === '..' || /[\\/]/.test(value)) {
+            throw new Error('Invalid session name.')
         }
         return value
     }

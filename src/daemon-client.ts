@@ -1,4 +1,4 @@
-import type { ActionReport, ActionTiming, ElementNode, Graph, NetworkRoute, Snapshot, TraceReport } from './types.js'
+import type { ActionReport, ActionTiming, ElementNode, Graph, NetworkRoute, SessionState, Snapshot, TraceReport } from './types.js'
 import type { Cookie } from 'playwright'
 import type { WaitCondition } from './browser.js'
 
@@ -300,6 +300,21 @@ export class DaemonClient {
     async close(session: string): Promise<void> {
         const response = await fetch(`${this.baseUrl}/sessions/${session}`, { method: 'DELETE' })
         await this.handleResponse(response, 'Close')
+    }
+
+    async renameSession(session: string, newName: string): Promise<{ renamed: boolean; oldName: string; newName: string }> {
+        const response = await this.post(`/sessions/${session}/rename`, { newName })
+        return this.handleResponse(response, 'RenameSession') as Promise<{ renamed: boolean; oldName: string; newName: string }>
+    }
+
+    async exportSession(session: string): Promise<SessionState> {
+        const response = await this.get(`/sessions/${session}/export`)
+        return this.handleResponse(response, 'ExportSession') as Promise<SessionState>
+    }
+
+    async importSession(session: string, state: SessionState, force: boolean = false): Promise<{ imported: boolean; session: string }> {
+        const response = await this.post(`/sessions/${session}/import`, { state, force })
+        return this.handleResponse(response, 'ImportSession') as Promise<{ imported: boolean; session: string }>
     }
 
     async setProfiling(session: string, enabled: boolean): Promise<{ profiling: boolean, timingsCount: number }> {

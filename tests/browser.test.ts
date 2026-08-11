@@ -224,12 +224,22 @@ describe('BrowserSession', () => {
         }
     })
 
-    it('applies custom viewport', async () => {
-        const session = await createBrowserSession('test-viewport')
+    it('applies and restores custom viewport from session state', async () => {
+        let session = await createBrowserSession('test-viewport')
+        const viewport = { width: 1920, height: 1080 }
         try {
-            const graph = await session.capture(testPage, { width: 1920, height: 1080 })
+            const graph = await session.capture(testPage, viewport)
 
-            expect(graph.viewport).toEqual({ width: 1920, height: 1080 })
+            expect(graph.viewport).toEqual(viewport)
+            expect(session.getState().viewport).toEqual(viewport)
+        } finally {
+            await session.close()
+        }
+
+        session = await createBrowserSession('test-viewport')
+        try {
+            const restoredGraph = await session.capture()
+            expect(restoredGraph.viewport).toEqual(viewport)
         } finally {
             await session.close()
         }
@@ -393,6 +403,37 @@ describe('BrowserSession', () => {
 
             const data = await session.getLocalStorage()
             expect(data.key).toBe('value')
+        } finally {
+            await session.close()
+            server.close()
+        }
+    })
+
+    it('persists only string values when storage exposes an enumerable setItem', async () => {
+        const server = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<html><body></body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const port = (server.address() as AddressInfo).port
+        const url = `http://localhost:${port}`
+
+        const session = await createBrowserSession('test-storage-enumerable-method')
+        try {
+            await session.capture(url)
+            const page = session.getPage()
+            expect(page).toBeDefined()
+            await page!.evaluate(() => {
+                Object.defineProperty(window.localStorage, 'setItem', {
+                    configurable: true,
+                    enumerable: true,
+                    value: () => 'not a storage value'
+                })
+            })
+
+            await session.capture()
+
+            expect(session.getState().localStorage).not.toHaveProperty('setItem')
         } finally {
             await session.close()
             server.close()
