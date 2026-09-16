@@ -96,8 +96,18 @@ export class DaemonClient {
         return this.handleResponse(response, 'Click') as Promise<{ clicked: boolean }>
     }
 
+    async clickQuery(session: string, query: string): Promise<{ clicked: boolean }> {
+        const response = await this.post(`/sessions/${session}/click`, { query })
+        return this.handleResponse(response, 'Click') as Promise<{ clicked: boolean }>
+    }
+
     async fill(session: string, elementId: string, text: string): Promise<{ filled: boolean }> {
         const response = await this.post(`/sessions/${session}/fill`, { elementId, text })
+        return this.handleResponse(response, 'Fill') as Promise<{ filled: boolean }>
+    }
+
+    async fillQuery(session: string, query: string, text: string): Promise<{ filled: boolean }> {
+        const response = await this.post(`/sessions/${session}/fill`, { query, text })
         return this.handleResponse(response, 'Fill') as Promise<{ filled: boolean }>
     }
 

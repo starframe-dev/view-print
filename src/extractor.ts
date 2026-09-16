@@ -1,9 +1,34 @@
 import type { BoundingBox, CascadeEntry, ElementNode, PseudoElementNode, RawSnapshotElement } from './types.js'
 
+interface ViewPrintWindow extends Window {
+    __viewPrintNextElementId?: number
+}
+
 export function extractSnapshotData(): RawSnapshotElement[] {
     const elements = Array.from(document.querySelectorAll('body, body *'))
     const result: RawSnapshotElement[] = []
     const elementToId = new Map<Element, string>()
+    const idsInSnapshot = new Set<string>()
+    const viewPrintWindow = window as ViewPrintWindow
+    let nextElementId = viewPrintWindow.__viewPrintNextElementId ?? 1
+
+    const getElementId = (element: Element): string => {
+        const existingId = element.getAttribute('data-viewprint-id')
+        if (existingId && /^e\d+$/.test(existingId) && !idsInSnapshot.has(existingId)) {
+            idsInSnapshot.add(existingId)
+            const numericId = Number(existingId.slice(1))
+            nextElementId = Math.max(nextElementId, numericId + 1)
+            return existingId
+        }
+
+        while (idsInSnapshot.has(`e${nextElementId}`)) {
+            nextElementId += 1
+        }
+        const newId = `e${nextElementId}`
+        nextElementId += 1
+        idsInSnapshot.add(newId)
+        return newId
+    }
 
     function getVisibleText(element: Element): string | undefined {
         const texts: string[] = []
@@ -107,8 +132,8 @@ export function extractSnapshotData(): RawSnapshotElement[] {
         return undefined
     }
 
-    elements.forEach((element, index) => {
-        const id = `e${index + 1}`
+    elements.forEach((element) => {
+        const id = getElementId(element)
         element.setAttribute('data-viewprint-id', id)
         elementToId.set(element, id)
         const parentId = element.parentElement
@@ -148,6 +173,7 @@ export function extractSnapshotData(): RawSnapshotElement[] {
         })
     })
 
+    viewPrintWindow.__viewPrintNextElementId = nextElementId
     return result
 }
 

@@ -1,2 +1,9 @@
 allowBuilds:
-  esbuild: true
+  '@google/genai': true
+  esbuild: set this to true or false
+  protobufjs: true
+minimumReleaseAgeExclude:
+  - '@human-horizon/code-check@0.4.0 || 0.4.1'
+  - '@human-horizon/weft@0.6.0'
+overrides:
+  '@starframe/view-print': 'link:'

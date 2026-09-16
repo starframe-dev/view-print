@@ -90,6 +90,7 @@ describe('ViewPrintDaemon', () => {
         const startSpy = vi.spyOn(BrowserSession.prototype, 'start').mockImplementation(async function (this: BrowserSession) {
             headlessModes.push(this.isHeadless())
         })
+        const usableSpy = vi.spyOn(BrowserSession.prototype, 'isUsable').mockReturnValue(true)
         const captureSpy = vi.spyOn(BrowserSession.prototype, 'capture').mockResolvedValue({
             url: testPage,
             viewport: { width: 1280, height: 720 },
@@ -104,6 +105,7 @@ describe('ViewPrintDaemon', () => {
             expect(captureSpy).toHaveBeenCalledTimes(2)
         } finally {
             startSpy.mockRestore()
+            usableSpy.mockRestore()
             captureSpy.mockRestore()
         }
     })

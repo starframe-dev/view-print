@@ -161,20 +161,33 @@ program
     })
 
 program
-    .command('click <elementId>')
-    .description('Click element by viewprint ID')
-    .action(async (elementId: string) => {
+    .command('click [elementId]')
+    .description('Click element by viewprint ID or CSS selector')
+    .option('--query <selector>', 'Click the element matching a CSS selector without refreshing refs')
+    .action(async (elementId: string | undefined, options: { query?: string }) => {
+        if ((elementId === undefined) === (options.query === undefined)) {
+            throw new Error('Provide exactly one of <elementId> or --query <selector>')
+        }
         const client = await getClient()
-        const result = await client.click(getSessionName(), normalizeRef(elementId))
+        const result = options.query === undefined
+            ? await client.click(getSessionName(), normalizeRef(elementId!))
+            : await client.clickQuery(getSessionName(), options.query)
         console.log(JSON.stringify(result, null, 2))
     })
 
 program
-    .command('fill <elementId> <text>')
-    .description('Clear and fill input element')
-    .action(async (elementId: string, text: string) => {
+    .command('fill [elementId] [text]')
+    .description('Clear and fill input by viewprint ID or CSS selector')
+    .option('--query <selector>', 'Fill the element matching a CSS selector without refreshing refs')
+    .action(async (elementId: string | undefined, text: string | undefined, options: { query?: string }) => {
+        const queryText = options.query !== undefined && text === undefined ? elementId : text
+        if (queryText === undefined || (options.query === undefined && elementId === undefined)) {
+            throw new Error('Provide <elementId> <text> or --query <selector> <text>')
+        }
         const client = await getClient()
-        const result = await client.fill(getSessionName(), normalizeRef(elementId), text)
+        const result = options.query === undefined
+            ? await client.fill(getSessionName(), normalizeRef(elementId!), queryText)
+            : await client.fillQuery(getSessionName(), options.query, queryText)
         console.log(JSON.stringify(result, null, 2))
     })
 

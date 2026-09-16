@@ -274,7 +274,11 @@ export class ViewPrintDaemon {
             if (req.method === 'POST' && action === 'click') {
                 const body = await this.readJson(req)
                 const session = await this.getOrCreateSession(sessionName)
-                await session.click(body.elementId)
+                if (typeof body.query === 'string') {
+                    await session.clickQuery(body.query)
+                } else {
+                    await session.click(body.elementId)
+                }
                 this.sendJson(res, 200, { clicked: true })
                 return
             }
@@ -282,7 +286,11 @@ export class ViewPrintDaemon {
             if (req.method === 'POST' && action === 'fill') {
                 const body = await this.readJson(req)
                 const session = await this.getOrCreateSession(sessionName)
-                await session.fill(body.elementId, body.text)
+                if (typeof body.query === 'string') {
+                    await session.fillQuery(body.query, body.text)
+                } else {
+                    await session.fill(body.elementId, body.text)
+                }
                 this.sendJson(res, 200, { filled: true })
                 return
             }
@@ -698,8 +706,13 @@ export class ViewPrintDaemon {
 
     private async getOrCreateSession(name: string, options: { noHeadless?: boolean } = {}): Promise<BrowserSession> {
         const existing = this.sessions.get(name)
-        if (existing) {
+        if (existing?.isUsable()) {
             return existing
+        }
+        if (existing) {
+            await existing.close()
+            this.sessions.delete(name)
+            this.tracingSessions.delete(name)
         }
 
         const session = new BrowserSession(name, { headless: !options.noHeadless })

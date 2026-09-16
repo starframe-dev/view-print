@@ -2,6 +2,7 @@ import http from 'node:http'
 import { AddressInfo } from 'node:net'
 import { describe, expect, it } from 'vitest'
 import { BrowserSession, createBrowserSession, getBrowserLaunchOptions } from '../src/browser.js'
+import { loadSession } from '../src/session.js'
 import type { CaptureNode, ElementNode } from '../src/types.js'
 
 const testPage = `data:text/html,${encodeURIComponent(`
@@ -61,8 +62,15 @@ describe('BrowserSession', () => {
     it('defaults to headless and supports headed launch configuration', () => {
         expect(new BrowserSession('headless-default').isHeadless()).toBe(true)
         expect(new BrowserSession('headed-session', { headless: false }).isHeadless()).toBe(false)
-        expect(getBrowserLaunchOptions()).toEqual({ headless: true })
-        expect(getBrowserLaunchOptions({ headless: false })).toEqual({ headless: false })
+        expect(getBrowserLaunchOptions()).toEqual({ channel: 'chrome', headless: true })
+        expect(getBrowserLaunchOptions({ headless: false })).toEqual({ channel: 'chrome', headless: false })
+    })
+
+    it('reports whether the browser page is still usable', async () => {
+        const session = await createBrowserSession('test-browser-usability')
+        expect(session.isUsable()).toBe(true)
+        await session.close()
+        expect(session.isUsable()).toBe(false)
     })
 
     it('captures lightweight layout tree from a page at depth=1', async () => {
@@ -91,6 +99,27 @@ describe('BrowserSession', () => {
             expect(container!.childrenCount).toBeGreaterThan(0)
         } finally {
             await session.close()
+        }
+    })
+
+    it('captures after DOMContentLoaded without waiting for pending resources', async () => {
+        const server = http.createServer((request, response) => {
+            if (request.url === '/pending') {
+                return
+            }
+            response.writeHead(200, { 'Content-Type': 'text/html' })
+            response.end('<html><body><img src="/pending"><p>Ready</p></body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const port = (server.address() as AddressInfo).port
+        const session = await createBrowserSession('test-domcontentloaded')
+
+        try {
+            const graph = await session.capture(`http://localhost:${port}`)
+            expect(graph.tree[0]?.tag).toBe('body')
+        } finally {
+            await session.close()
+            server.close()
         }
     })
 
@@ -206,6 +235,52 @@ describe('BrowserSession', () => {
             const updatedCount = Object.keys(flattenTree(updatedGraph.tree)).length
 
             expect(updatedCount).toBeGreaterThan(initialCount)
+        } finally {
+            await session.close()
+        }
+    })
+
+    it('keeps an element ref when the DOM changes before click', async () => {
+        const session = await createBrowserSession('test-browser-persistent-ref')
+        try {
+            const graph = await session.capture(testPage, undefined, 9999)
+            const buttonNode = findByTag(graph.tree, 'button')
+            expect(buttonNode).toBeDefined()
+
+            await session.eval(`(() => {
+                const marker = document.createElement('div')
+                marker.textContent = 'inserted before target'
+                document.querySelector('#btn')?.before(marker)
+            })()`)
+            const updatedGraph = await session.capture(undefined, undefined, 9999)
+            const updatedButton = findByAttribute(updatedGraph.tree, 'id', 'btn')
+            expect(updatedButton?.id).toBe(buttonNode!.id)
+
+            await session.click(buttonNode!.id)
+            const addedCount = await session.eval('document.querySelectorAll("#added").length')
+            expect(addedCount).toBe(1)
+        } finally {
+            await session.close()
+        }
+    })
+
+    it('clicks and fills through CSS selectors without refreshing refs', async () => {
+        const session = await createBrowserSession('test-browser-query-actions')
+        try {
+            await session.capture(testPage, undefined, 9999)
+            await session.eval(`(() => {
+                const input = document.createElement('input')
+                input.id = 'query-input'
+                document.body.appendChild(input)
+            })()`)
+
+            await session.fillQuery('#query-input', 'query value')
+            const value = await session.eval('document.querySelector("#query-input")?.value')
+            expect(value).toBe('query value')
+
+            await session.clickQuery('#btn')
+            const addedCount = await session.eval('document.querySelectorAll("#added").length')
+            expect(addedCount).toBe(1)
         } finally {
             await session.close()
         }
@@ -381,6 +456,36 @@ describe('BrowserSession', () => {
 
             const cookies = await session.getCookies()
             expect(cookies.some((c) => c.name === 'session' && c.value === 'abc')).toBe(true)
+        } finally {
+            await session.close()
+            server.close()
+        }
+    })
+
+    it('persists cookies changed between commands', async () => {
+        const server = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<html><body></body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const port = (server.address() as AddressInfo).port
+        const url = `http://localhost:${port}`
+        const sessionName = 'test-background-cookie-persistence'
+        const session = await createBrowserSession(sessionName)
+
+        try {
+            await session.capture(url)
+            await session.getPage()!.context().addCookies([{ name: 'background', value: 'saved', url }])
+            await new Promise<void>((resolve) => setTimeout(resolve, 1500))
+
+            const savedState = loadSession(sessionName)
+            expect(savedState.cookies.some((cookie) => cookie.name === 'background' && cookie.value === 'saved')).toBe(true)
+
+            await session.getPage()!.context().addCookies([{ name: 'final', value: 'saved', url }])
+            await session.close()
+
+            const finalState = loadSession(sessionName)
+            expect(finalState.cookies.some((cookie) => cookie.name === 'final' && cookie.value === 'saved')).toBe(true)
         } finally {
             await session.close()
             server.close()

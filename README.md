@@ -61,6 +61,8 @@ viewprint daemon status
 viewprint daemon stop
 ```
 
+Если Chromium page/context закрылись из-за сбоя, daemon автоматически пересоздаёт stale-сессию при следующей команде и восстановит сохранённый state.
+
 ### Capture / snapshot
 
 ```bash
@@ -222,7 +224,9 @@ viewprint mcp
 }
 ```
 
-Cookies восстанавливаются через Playwright `storageState` (только cookies, без IndexedDB). localStorage / sessionStorage восстанавливаются через `page.evaluate` после `goto`. Viewport восстанавливается при запуске сессии.
+Cookies восстанавливаются через Playwright `storageState` (только cookies, без IndexedDB). localStorage / sessionStorage восстанавливаются через `page.evaluate` после `goto`. Viewport восстанавливается при запуске сессии. Состояние активной сессии автоматически синхронизируется на диск раз в секунду, поэтому cookies, изменённые асинхронно страницей, сохраняются без следующей команды CLI. При закрытии выполняется финальная синхронизация.
+
+Синхронизация best-effort и не защищает от `SIGKILL`, отключения питания или истечения/отзыва cookies самим сайтом. JSON состояния не шифруется и может содержать авторизационные секреты.
 
 ## Profiling
 
@@ -260,7 +264,7 @@ viewprint -s X capture URL --profile --trace /tmp/page.json  # оба вмест
 
 ### Skip / no navigation
 
-Полезно с профилированием — чтобы измерять только действие, а не navigation.
+Полезно с профилированием — чтобы измерять только действие, а не navigation. Обычная навигация ждёт `DOMContentLoaded`, а не событие полного `load`: динамические сайты вроде Threads могут продолжать загружать фоновые ресурсы бесконечно.
 
 ```bash
 viewprint -s X capture URL --skip-load    # не делать goto если URL уже совпадает

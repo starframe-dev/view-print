@@ -4,10 +4,16 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@starframe/view-print': 'link:'
+
 importers:
 
   .:
     dependencies:
+      '@starframe/view-print':
+        specifier: 'link:'
+        version: 'link:'
       commander:
         specifier: ^12.1.0
         version: 12.1.0

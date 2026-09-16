@@ -37,6 +37,7 @@
     },
     "homepage": "https://github.com/starframe-dev/view-print#readme",
     "dependencies": {
+        "@starframe/view-print": "link:",
         "commander": "^12.1.0",
         "playwright": "^1.45.0"
     },

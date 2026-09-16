@@ -20,8 +20,10 @@ export interface BrowserSessionOptions {
     headless?: boolean
 }
 
-export function getBrowserLaunchOptions(options: BrowserSessionOptions = {}): { headless: boolean } {
-    return { headless: options.headless ?? true }
+const STATE_PERSIST_INTERVAL_MS = 1000
+
+export function getBrowserLaunchOptions(options: BrowserSessionOptions = {}): { channel: 'chrome'; headless: boolean } {
+    return { channel: 'chrome', headless: options.headless ?? true }
 }
 
 export class BrowserSession {
@@ -41,6 +43,8 @@ export class BrowserSession {
     private closing = false
     private profiling = false
     private timings: ActionTiming[] = []
+    private statePersistTimer: NodeJS.Timeout | null = null
+    private statePersistQueue: Promise<void> = Promise.resolve()
 
     constructor(name: string, options: BrowserSessionOptions = {}) {
         this.name = name
@@ -50,6 +54,10 @@ export class BrowserSession {
 
     isHeadless(): boolean {
         return this.headless
+    }
+
+    isUsable(): boolean {
+        return !this.closing && this.page !== null && !this.page.isClosed() && (this.browser?.isConnected() ?? false)
     }
 
     async start(): Promise<void> {
@@ -64,6 +72,23 @@ export class BrowserSession {
         if (this.state.viewport) {
             await this.page.setViewportSize(this.state.viewport)
         }
+        this.startStatePersistence()
+    }
+
+    private startStatePersistence(): void {
+        this.statePersistTimer = setInterval(() => {
+            void this.persistState().catch((error: unknown) => {
+                console.error('Background state persistence error:', error)
+            })
+        }, STATE_PERSIST_INTERVAL_MS)
+    }
+
+    private stopStatePersistence(): void {
+        if (this.statePersistTimer === null) {
+            return
+        }
+        clearInterval(this.statePersistTimer)
+        this.statePersistTimer = null
     }
 
     async capture(
@@ -83,8 +108,9 @@ export class BrowserSession {
                 || (options?.skipLoad === true && Boolean(url) && this.page.url() === url)
 
             if (url && !skipGoto) {
-                await this.page.goto(url)
                 this.state.url = url
+                await this.persistState()
+                await this.page.goto(url, { waitUntil: 'domcontentloaded' })
                 await this.restoreStorage()
             }
             // If skipGoto: keep state.url as-is (it's already the actual current URL).
@@ -185,6 +211,17 @@ export class BrowserSession {
         })
     }
 
+    async clickQuery(selector: string): Promise<void> {
+        return this.timed('clickQuery', async () => {
+            if (!this.page) {
+                throw new Error('Session not started. Call start() first.')
+            }
+            await this.page.locator(selector).click()
+            await this.page.waitForTimeout(100)
+            await this.persistState()
+        })
+    }
+
     async fill(elementId: string, text: string): Promise<void> {
         return this.timed('fill', async () => {
             await this.runElementAction(elementId, (el) => {
@@ -194,6 +231,16 @@ export class BrowserSession {
                 }
             })
             await this.page!.fill(this.selectorFor(elementId), text)
+            await this.persistState()
+        })
+    }
+
+    async fillQuery(selector: string, text: string): Promise<void> {
+        return this.timed('fillQuery', async () => {
+            if (!this.page) {
+                throw new Error('Session not started. Call start() first.')
+            }
+            await this.page.locator(selector).fill(text)
             await this.persistState()
         })
     }
@@ -557,10 +604,11 @@ export class BrowserSession {
             return
         }
         this.closing = true
+        this.stopStatePersistence()
 
         // Best-effort state persistence (don't block cleanup on failure)
         try {
-            await this.persistState()
+            await this.persistState(true)
         } catch (error) {
             console.error('persistState error during close:', error)
         }
@@ -715,7 +763,7 @@ export class BrowserSession {
             }
             const newPage = await this.context.newPage()
             if (url) {
-                await newPage.goto(url)
+                await newPage.goto(url, { waitUntil: 'domcontentloaded' })
             }
             this.page = newPage
             if (url) {
@@ -1020,46 +1068,51 @@ export class BrowserSession {
         }
     }
 
-    private async persistState(): Promise<void> {
-        if (!this.context || !this.page) {
-            return
-        }
+    private persistState(force: boolean = false): Promise<void> {
+        const persist = this.statePersistQueue.then(async () => {
+            if ((!force && this.closing) || !this.context || !this.page) {
+                return
+            }
 
-        this.state.cookies = (await this.context.cookies()) as SessionState['cookies']
+            this.state.cookies = (await this.context.cookies()) as SessionState['cookies']
 
-        try {
-            this.state.localStorage = await this.page.evaluate(() => {
-                const result: Record<string, string> = {}
-                for (let i = 0; i < window.localStorage.length; i++) {
-                    const key = window.localStorage.key(i)
-                    if (key !== null) {
-                        const value = window.localStorage.getItem(key)
-                        if (value !== null) {
-                            result[key] = value
+            try {
+                this.state.localStorage = await this.page.evaluate(() => {
+                    const result: Record<string, string> = {}
+                    for (let i = 0; i < window.localStorage.length; i++) {
+                        const key = window.localStorage.key(i)
+                        if (key !== null) {
+                            const value = window.localStorage.getItem(key)
+                            if (value !== null) {
+                                result[key] = value
+                            }
                         }
                     }
-                }
-                return result
-            })
-            this.state.sessionStorage = await this.page.evaluate(() => {
-                const result: Record<string, string> = {}
-                for (let i = 0; i < window.sessionStorage.length; i++) {
-                    const key = window.sessionStorage.key(i)
-                    if (key !== null) {
-                        const value = window.sessionStorage.getItem(key)
-                        if (value !== null) {
-                            result[key] = value
+                    return result
+                })
+                this.state.sessionStorage = await this.page.evaluate(() => {
+                    const result: Record<string, string> = {}
+                    for (let i = 0; i < window.sessionStorage.length; i++) {
+                        const key = window.sessionStorage.key(i)
+                        if (key !== null) {
+                            const value = window.sessionStorage.getItem(key)
+                            if (value !== null) {
+                                result[key] = value
+                            }
                         }
                     }
-                }
-                return result
-            })
-        } catch {
-            this.state.localStorage = {}
-            this.state.sessionStorage = {}
-        }
+                    return result
+                })
+            } catch {
+                this.state.localStorage = {}
+                this.state.sessionStorage = {}
+            }
 
-        saveSession(this.state)
+            saveSession(this.state)
+        })
+
+        this.statePersistQueue = persist.catch(() => undefined)
+        return persist
     }
 }
 
