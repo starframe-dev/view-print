@@ -1,8 +1,8 @@
-import { runIntegrationE2eCheck } from '@human-horizon/code-check'
+import { runProjectSpecCheck } from "@human-horizon/code-check"
 
 export async function main(args: string[]): Promise<void> {
     const projectPath = args[0] ?? process.cwd()
-    const result = await runIntegrationE2eCheck(projectPath)
+    const result = await runProjectSpecCheck(projectPath)
     if (!result.ok) {
         console.error(result.error.message)
         process.exit(1)
