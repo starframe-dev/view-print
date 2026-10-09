@@ -28,10 +28,14 @@
 
 ## Критерии приёмки
 
-- [x] `pnpm install --frozen-lockfile`, `pnpm run lint`, `pnpm test`, `pnpm run build` проходят.
+- [x] `pnpm install --frozen-lockfile`, `pnpm run lint`, `pnpm test`, `pnpm run build` проходят (проверено на Node 22 с Chromium 149: 10 файлов, 129 тестов). `vitest.config.ts` исключает `dist/**`, чтобы не запускать скомпилированные копии тестов.
+- [x] Vitest обновлён с `^2.0.0` (lock 2.1.9) до `^4.1.11` (lock 4.1.11) с явным `vite@^7` для peer-зависимости.
+- [x] Positional batch: регулярка исправлена на `/"[^"]+"|\S+/g`, парсер вынесен в `src/batch-parser.ts` и покрыт `tests/batch.test.ts`.
+- [x] MCP stdio запускается через `serveStdio(() => createMcpServer(session))`; `tests/mcp-stdio.test.ts` проверяет legacy handshake и `server/discover` с `_meta` для 2026-07-28.
+- [x] `pnpm run build` кладёт `dist/package.json` (нужен `dist/src/version.js`); до исправления собранный CLI/daemon не находил метаданные пакета.
 - [x] Добавлены acceptance-тесты на security, recovery, storage, frames, diff/dialog, packaging, CLI, performance, network и tracing.
-- [x] Packed tarball содержит только опубликованные файлы; установка во временный проект подтверждает library import и `viewprint --help`.
-- [x] Smoke-проверка установленного пакета подтверждает daemon start/status/stop/restart и прямой запуск через library API.
+- [ ] Packed tarball содержит только опубликованные файлы; установка во временный проект подтверждает library import и `viewprint --help`. (Не перепроверено после изменения сборки.)
+- [ ] Smoke-проверка установленного пакета подтверждает daemon start/status/stop/restart и прямой запуск через library API. (Не перепроверено после изменения сборки.)
 - [x] CI workflow настроен для Node 20 и 22, установки Playwright Chromium и lint/test/build/pack/smoke; GitHub Actions execution ещё не запускался в этой сессии.
 - [x] README и checked acceptance-пункты не описывают placeholders/no-op как готовые функции.
 

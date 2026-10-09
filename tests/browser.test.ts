@@ -2,7 +2,7 @@ import http from 'node:http'
 import { AddressInfo } from 'node:net'
 import { describe, expect, it } from 'vitest'
 import { BrowserSession, createBrowserSession, getBrowserLaunchOptions } from '../src/browser.js'
-import { loadSession } from '../src/session.js'
+import { deleteSession, loadSession } from '../src/session.js'
 import type { CaptureNode, ElementNode } from '../src/types.js'
 
 const testPage = `data:text/html,${encodeURIComponent(`
@@ -554,6 +554,7 @@ describe('BrowserSession', () => {
         const port = (server.address() as AddressInfo).port
         const url = `http://localhost:${port}`
 
+        deleteSession('test-tabs')
         const session = await createBrowserSession('test-tabs')
         try {
             await session.capture(url)

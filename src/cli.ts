@@ -13,6 +13,7 @@ import {
     stopDaemonProcess
 } from './daemon-process.js'
 import { runMcpServer } from './mcp.js'
+import { parseBatchCommands } from './batch-parser.js'
 import type { WaitCondition } from './browser.js'
 import type { NetworkRoute } from './types.js'
 import { getPackageVersion } from './version.js'
@@ -346,19 +347,7 @@ program
             }
             parsedCommands = JSON.parse(input)
         } else {
-            parsedCommands = commands.map((cmd) => {
-                const parts = cmd.match(/"[^"]+"|\\S+/g) || []
-                return parts.map((part) => {
-                    if (part.startsWith('"') && part.endsWith('"')) {
-                        return part.slice(1, -1)
-                    }
-                    try {
-                        return JSON.parse(part)
-                    } catch {
-                        return part
-                    }
-                })
-            })
+            parsedCommands = parseBatchCommands(commands)
         }
 
         const result = await client.batch(getSessionName(), parsedCommands)

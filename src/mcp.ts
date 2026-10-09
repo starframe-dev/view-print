@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/server'
 import type { CallToolResult } from '@modelcontextprotocol/server'
-import { StdioServerTransport } from '@modelcontextprotocol/server/stdio'
+import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { z } from 'zod'
 import { BrowserSession } from './browser.js'
 import { diffGraphs } from './diff.js'
@@ -124,8 +124,7 @@ export function createMcpServer(session: BrowserSession): McpServer {
 
 export async function runMcpServer(): Promise<void> {
     const session = new BrowserSession('mcp')
-    let server: McpServer | null = null
-    let connected = false
+    let stdio: { close(): Promise<void> } | null = null
     const inputClosed = new Promise<void>((resolve) => {
         if (process.stdin.readableEnded) {
             resolve()
@@ -136,13 +135,11 @@ export async function runMcpServer(): Promise<void> {
 
     try {
         await session.start()
-        server = createMcpServer(session)
-        await server.connect(new StdioServerTransport())
-        connected = true
+        stdio = serveStdio(() => createMcpServer(session))
         await inputClosed
     } finally {
-        if (connected && server) {
-            await server.close().catch(() => undefined)
+        if (stdio) {
+            await stdio.close().catch(() => undefined)
         }
         await session.close()
     }
