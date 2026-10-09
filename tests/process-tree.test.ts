@@ -153,9 +153,10 @@ describe('process-tree', () => {
     it('killChromeProcessesByUserDataDir kills matching chrome processes', async () => {
         // Spawn a fake chrome-headless-shell process with a unique user-data-dir in args
         const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'viewprint-test-chrome-'))
+        // argv carries the marker so `ps` shows it on both macOS and Linux (dash lacks `exec -a`)
         const child = spawn(
-            '/bin/sh',
-            ['-c', `exec -a 'chrome-headless-shell --user-data-dir=${userDataDir} --remote-debugging-pipe' sleep 600`],
+            process.execPath,
+            ['-e', 'setTimeout(() => {}, 600000)', 'chrome-headless-shell', `--user-data-dir=${userDataDir}`, '--remote-debugging-pipe'],
             { stdio: 'ignore' }
         )
         spawned.push(child)

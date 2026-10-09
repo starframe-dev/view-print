@@ -34,7 +34,7 @@
 - [x] MCP stdio запускается через `serveStdio(() => createMcpServer(session))`; `tests/mcp-stdio.test.ts` проверяет legacy handshake и `server/discover` с `_meta` для 2026-07-28.
 - [x] `pnpm run build` кладёт `dist/package.json` (нужен `dist/src/version.js`); до исправления собранный CLI/daemon не находил метаданные пакета.
 - [x] Добавлены acceptance-тесты на security, recovery, storage, frames, diff/dialog, packaging, CLI, performance, network и tracing.
-- [ ] Packed tarball содержит только опубликованные файлы; установка во временный проект подтверждает library import и `viewprint --help`. (Не перепроверено после изменения сборки.)
+- [x] Packed tarball содержит только опубликованные файлы; установка во временный проект подтверждает library import и `viewprint --help`. (Перепроверено после изменения сборки: `node scripts/smoke-package.mjs` прошёл локально на Node 22; `playwright` зафиксирован на 1.61.1, чтобы consumer и браузер из lock совпадали.)
 - [ ] Smoke-проверка установленного пакета подтверждает daemon start/status/stop/restart и прямой запуск через library API. (Не перепроверено после изменения сборки.)
 - [ ] CI workflow настроен для Node 22 (Node 20 не поддерживается: pnpm 11.9 требует Node ≥ 22.13), установки Playwright Chromium и lint/test/build/pack/smoke. Зелёный run на GitHub ещё не получен (run 37978615788 на d57a425 упал).
 - [x] README и checked acceptance-пункты не описывают placeholders/no-op как готовые функции.
