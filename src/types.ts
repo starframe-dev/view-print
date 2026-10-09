@@ -88,13 +88,20 @@ export interface Snapshot {
     tree: SnapshotNode[]
 }
 
+export interface SessionTabState {
+    id: string
+    url: string
+}
+
 export interface SessionState {
     name: string
     url?: string
     viewport?: { width: number; height: number }
     cookies: Array<{ name: string; value: string; domain: string; path: string; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: 'Strict' | 'Lax' | 'None' }>
-    localStorage: Record<string, string>
-    sessionStorage: Record<string, string>
+    localStorage: Record<string, Record<string, string>>
+    sessionStorage: Record<string, Record<string, Record<string, string>>>
+    tabs: SessionTabState[]
+    activeTabId?: string
 }
 
 export interface NetworkRequest {

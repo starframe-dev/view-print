@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
@@ -16,6 +17,8 @@ const DEFAULT_CATEGORIES: string[] = [
     'disabled-by-default-devtools.timeline.frame',
     'disabled-by-default-devtools.timeline.stack'
 ]
+const MAX_TRACE_EVENTS = 100_000
+const TRACE_COMPLETE_TIMEOUT_MS = 5_000
 
 interface TraceEvent {
     name?: string
@@ -26,25 +29,36 @@ interface TraceEvent {
     [key: string]: unknown
 }
 
-type DataCollectedHandler = (data: { value: TraceEvent[] }) => void
-type TracingCompleteHandler = () => void
-
 interface CDPSessionLike {
     send: (method: string, params?: Record<string, unknown>) => Promise<unknown>
-    on: (event: string, handler: (...args: unknown[]) => void) => void
-    off: (event: string, handler: (...args: unknown[]) => void) => void
+    on: (event: string, handler: (payload: unknown) => void) => void
+    off: (event: string, handler: (payload: unknown) => void) => void
+    detach: () => Promise<void>
 }
 
-/**
- * Manages Chrome DevTools Protocol Tracing for a single BrowserSession.
- * State machine: idle → recording → idle. Only one trace at a time.
- */
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parseEvents(payload: unknown): TraceEvent[] {
+    if (!isRecord(payload) || !Array.isArray(payload.value)) {
+        return []
+    }
+    return payload.value.filter(isRecord)
+}
+
+/** Manages one bounded Chrome DevTools Protocol trace. */
 export class TracingSession {
     private active = false
     private categories: string[] = []
     private startTime = 0
     private events: TraceEvent[] = []
     private cdpSession: CDPSession | null = null
+    private cdp: CDPSessionLike | null = null
+    private dataHandler: ((payload: unknown) => void) | null = null
+    private completeHandler: ((payload: unknown) => void) | null = null
+    private stopTimer: NodeJS.Timeout | null = null
+    private stopPromise: Promise<TraceReport> | null = null
 
     isActive(): boolean {
         return this.active
@@ -58,74 +72,107 @@ export class TracingSession {
         return this.events.length
     }
 
-    /**
-     * Starts CDP tracing. Must be called before any page actions to be captured.
-     */
     async start(page: Page, options: { categories?: string[] } = {}): Promise<void> {
-        if (this.active) {
+        if (this.active || this.cdpSession) {
             throw new Error('Tracing already active. Call stop() first.')
         }
 
-        this.categories = options.categories ?? DEFAULT_CATEGORIES
+        const categories = options.categories ?? DEFAULT_CATEGORIES
+        if (categories.length === 0 || !categories.every((category) => typeof category === 'string' && category.length > 0)) {
+            throw new Error('Trace categories must be a non-empty array of strings.')
+        }
+
+        this.categories = [...categories]
         this.events = []
         this.startTime = Date.now()
 
-        const context = page.context()
-        const session = await context.newCDPSession(page)
-        this.cdpSession = session
-
-        const handler: DataCollectedHandler = (data) => {
-            if (Array.isArray(data.value)) {
-                this.events.push(...data.value)
+        const cdpSession = await page.context().newCDPSession(page)
+        const cdp = cdpSession as unknown as CDPSessionLike
+        const dataHandler = (payload: unknown): void => {
+            const available = MAX_TRACE_EVENTS - this.events.length
+            if (available > 0) {
+                this.events.push(...parseEvents(payload).slice(0, available))
             }
         }
-        ;(session as unknown as CDPSessionLike).on('Tracing.dataCollected', handler as (...args: unknown[]) => void)
+        this.cdpSession = cdpSession
+        this.cdp = cdp
+        this.dataHandler = dataHandler
+        cdp.on('Tracing.dataCollected', dataHandler)
 
-        await session.send('Tracing.start', {
-            categories: this.categories.join(','),
-            options: 'sampling-frequency=10000'
-        })
-
-        this.active = true
+        try {
+            await cdp.send('Tracing.start', {
+                categories: this.categories.join(','),
+                options: 'sampling-frequency=10000',
+                transferMode: 'ReportEvents'
+            })
+            this.active = true
+        } catch (error) {
+            await this.cleanup(cdp)
+            throw error
+        }
     }
 
-    /**
-     * Stops CDP tracing and writes events to JSON file.
-     * Returns the report with statistics.
-     */
     async stop(page: Page, outputPath?: string): Promise<TraceReport> {
-        if (!this.active || !this.cdpSession) {
+        if (this.stopPromise) {
+            return this.stopPromise
+        }
+        const promise = this.stopInternal(page, outputPath)
+        this.stopPromise = promise
+        try {
+            return await promise
+        } finally {
+            this.stopPromise = null
+        }
+    }
+
+    private async stopInternal(page: Page, outputPath?: string): Promise<TraceReport> {
+        const cdp = this.cdp
+        if (!this.active || !cdp) {
             throw new Error('Tracing not active. Call start() first.')
         }
 
-        const startMs = this.startTime
-        const stopTime = Date.now()
-        const session = this.cdpSession as unknown as CDPSessionLike
-        const events = this.events
-
-        const report = await new Promise<TraceReport>((resolve, reject) => {
+        const startedAt = this.startTime
+        const stoppedAt = Date.now()
+        const completion = new Promise<void>((resolve) => {
             let completed = false
-            const finalize = (): void => {
+            const finish = (): void => {
                 if (completed) return
                 completed = true
-                this.writeReport(events, startMs, stopTime, outputPath).then(resolve).catch(reject)
+                resolve()
             }
-            const completeHandler: TracingCompleteHandler = () => finalize()
-            ;(session as unknown as CDPSessionLike).on('Tracing.tracingComplete', completeHandler as (...args: unknown[]) => void)
-            session.send('Tracing.end').catch(() => finalize())
-            // Timeout fallback in case tracingComplete never fires
-            setTimeout(() => finalize(), 5000)
+            this.completeHandler = finish
+            cdp.on('Tracing.tracingComplete', finish)
+            this.stopTimer = setTimeout(finish, TRACE_COMPLETE_TIMEOUT_MS)
+            void cdp.send('Tracing.end').catch(finish)
         })
 
-        // Suppress unused parameter warning; page is kept for API symmetry
-        void page
-        return report
+        try {
+            await completion
+            void page
+            return await this.writeReport(this.events, startedAt, stoppedAt, outputPath)
+        } finally {
+            await this.cleanup(cdp)
+        }
     }
 
-    /**
-     * Generates a summary report from collected events without writing.
-     * Useful for live inspection.
-     */
+    async close(): Promise<void> {
+        if (this.stopPromise) {
+            await this.stopPromise.catch(() => undefined)
+        }
+        const cdp = this.cdp
+        if (!cdp) {
+            this.active = false
+            return
+        }
+        try {
+            if (this.active) {
+                await cdp.send('Tracing.end').catch(() => undefined)
+            }
+        } finally {
+            await this.cleanup(cdp)
+        }
+    }
+
     report(): TraceReport {
         return {
             path: '',
@@ -136,72 +183,102 @@ export class TracingSession {
         }
     }
 
-    private async writeReport(events: TraceEvent[], startMs: number, stopTime: number, outputPath?: string): Promise<TraceReport> {
-        const targetPath = outputPath ?? this.defaultPath()
-        await fs.mkdir(path.dirname(targetPath), { recursive: true })
-
-        const traceFile = { traceEvents: events }
-        const json = JSON.stringify(traceFile)
-        await fs.writeFile(targetPath, json, 'utf-8')
-
+    private async cleanup(cdp: CDPSessionLike): Promise<void> {
+        if (this.stopTimer) {
+            clearTimeout(this.stopTimer)
+            this.stopTimer = null
+        }
+        if (this.dataHandler) {
+            cdp.off('Tracing.dataCollected', this.dataHandler)
+            this.dataHandler = null
+        }
+        if (this.completeHandler) {
+            cdp.off('Tracing.tracingComplete', this.completeHandler)
+            this.completeHandler = null
+        }
         this.active = false
+        this.cdp = null
+        this.cdpSession = null
+        try {
+            await cdp.detach()
+        } catch {
+            // CDP sessions may already be detached by page teardown.
+        }
+    }
+
+    private async writeReport(
+        events: TraceEvent[],
+        startedAt: number,
+        stoppedAt: number,
+        outputPath?: string
+    ): Promise<TraceReport> {
+        const targetPath = outputPath ?? this.defaultPath()
+        const parentDirectory = path.dirname(targetPath)
+        const isDefaultPath = outputPath === undefined
+        await fs.mkdir(parentDirectory, { recursive: true, mode: isDefaultPath ? 0o700 : 0o755 })
+        if (isDefaultPath) {
+            await fs.chmod(parentDirectory, 0o700)
+        }
+
+        const json = JSON.stringify({ traceEvents: events })
+        const temporaryPath = `${targetPath}.${randomUUID()}.tmp`
+        try {
+            await fs.writeFile(temporaryPath, json, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+            await fs.rename(temporaryPath, targetPath)
+        } finally {
+            await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
+        }
 
         return {
             path: targetPath,
-            durationMs: stopTime - startMs,
+            durationMs: stoppedAt - startedAt,
             eventCount: events.length,
-            sizeBytes: Buffer.byteLength(json, 'utf-8'),
+            sizeBytes: Buffer.byteLength(json, 'utf8'),
             ...this.computeAggregates(events)
         }
     }
 
     private defaultPath(): string {
-        const dir = path.join(os.homedir(), '.viewprint', 'traces')
+        const directory = path.join(os.homedir(), '.viewprint', 'traces')
         const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-        return path.join(dir, `trace-${stamp}.json`)
+        return path.join(directory, `trace-${stamp}.json`)
     }
 
     private computeAggregates(events: TraceEvent[]): Pick<TraceReport, 'categoryCounts' | 'topEvents'> {
-        const categoryCounts: Record<string, number> = {}
-        const topEvents: Array<{ name: string, dur: number, ts: number }> = []
+        const categoryCounts: Record<string, number> = Object.create(null) as Record<string, number>
+        const topEvents: Array<{ name: string; dur: number; ts: number }> = []
 
-        for (const ev of events) {
-            if (ev.cat) {
-                for (const cat of ev.cat.split(',')) {
-                    categoryCounts[cat] = (categoryCounts[cat] ?? 0) + 1
+        for (const event of events) {
+            if (event.cat) {
+                for (const category of event.cat.split(',')) {
+                    categoryCounts[category] = (categoryCounts[category] ?? 0) + 1
                 }
             }
-            if (typeof ev.dur === 'number' && ev.dur > 0 && typeof ev.name === 'string') {
-                topEvents.push({ name: ev.name, dur: ev.dur, ts: ev.ts ?? 0 })
+            if (typeof event.dur === 'number' && event.dur > 0 && typeof event.name === 'string') {
+                topEvents.push({ name: event.name, dur: event.dur, ts: event.ts ?? 0 })
             }
         }
 
-        topEvents.sort((a, b) => b.dur - a.dur)
+        topEvents.sort((left, right) => right.dur - left.dur)
         return { categoryCounts, topEvents: topEvents.slice(0, 10) }
     }
 }
 
-/**
- * Convenience helper: start tracing, run callback, stop tracing.
- * Returns the report.
- */
 export async function capturePerformanceTrace<T>(
     page: Page,
-    options: { categories?: string[], outputPath?: string },
+    options: { categories?: string[]; outputPath?: string },
     fn: () => Promise<T>
-): Promise<{ result: T, report: TraceReport }> {
+): Promise<{ result: T; report: TraceReport }> {
     const tracing = new TracingSession()
     await tracing.start(page, options)
-    let result: T
     try {
-        result = await fn()
-    } catch (err) {
-        // Still stop tracing so we don't leak the active flag
-        try { await tracing.stop(page, options.outputPath) } catch { /* ignore */ }
-        throw err
+        const result = await fn()
+        const report = await tracing.stop(page, options.outputPath)
+        return { result, report }
+    } catch (error) {
+        await tracing.close()
+        throw error
     }
-    const report = await tracing.stop(page, options.outputPath)
-    return { result, report }
 }
 
 export function getDefaultCategories(): string[] {

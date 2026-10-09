@@ -1,9 +1,14 @@
+packages:
+  - .
+  - .lore/weft
+
 allowBuilds:
   '@google/genai': true
-  esbuild: set this to true or false
+  esbuild: true
   protobufjs: true
+
 minimumReleaseAgeExclude:
   - '@human-horizon/code-check@0.4.0 || 0.4.1'
   - '@human-horizon/weft@0.6.0'
-overrides:
-  '@starframe/view-print': 'link:'
+  - '@modelcontextprotocol/core@2.3.1'
+  - '@modelcontextprotocol/server@2.3.1'

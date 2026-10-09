@@ -2,7 +2,7 @@
 
 ## Контекст
 
-Нужен standalone AI-инструмент для точной верстки. Плагин Playwright запускает браузер, вычисляет позиции и базовую информацию об элементах, и отдаёт граф в виде плоского JSON (adjacency list). Детальные CSS-данные запрашиваются отдельно по конкретному элементу через `inspect`.
+Standalone-инструмент на Playwright для анализа layout и browser automation. `capture` возвращает вложенное дерево рендерируемых элементов, а `inspect` — computed styles и диагностические сведения об одном элементе. `inspect` не гарантирует полный расчёт CSS-каскада.
 
 Инструмент работает через CLI `viewprint` и демон с HTTP API. Демон держит браузер открытым между командами. Граф содержит только рендеримые элементы внутри `<body>`, без умолчательных CSS-значений и без текста скриптов/стилей. Поддерживается настройка viewport для разных разрешений.
 
@@ -15,11 +15,11 @@
 - исключает `<html>`, `<head>` и их потомков (кроме `<body>`);
 - не включает текст из `<script>` и `<style>`;
 - позволяет задавать viewport для эмуляции разных разрешений экрана;
-- предоставляет команду `inspect <elementId>` для получения полных CSS-данных конкретного элемента;
+- предоставляет команду `inspect <elementId>` для получения computed styles и приблизительной диагностики CSS конкретного элемента;
 - сохраняет состояние сессии (URL, cookies, localStorage) между запросами;
 - перевычисляет граф только при команде `capture`;
 - предоставляет команды `capture`, `inspect`, `click`, `status` и `close`;
-- выводит граф в формате плоского JSON adjacency list;
+- выводит граф в формате вложенного JSON-дерева;
 - работает через демон с HTTP API, держащий браузер открытым между командами.
 
 ## Что изменится
@@ -63,9 +63,9 @@ document.querySelectorAll('body, body *')
 
 Пример: для `<div>Hello <span>world</span>!</div>` у `div` будет `text: "Hello !"`, у `span` — `text: "world"`.
 
-### 3. Snapshot — accessibility tree с refs
+### 3. Snapshot — семантический DOM с refs
 
-`Snapshot` возвращает иерархическое accessibility-дерево элементов внутри `<body>`. Каждый узел содержит `ref` (например, `e2`), который можно использовать в `click @e2` и `inspect @e2`. Параметр `depth` (default `1`) управляет раскрытием аналогично `capture`.
+`Snapshot` возвращает иерархический semantic DOM snapshot с `role` и приближённым accessible name; он не является полным accessibility tree браузера. Каждый узел содержит `ref` (например, `e2`), который можно использовать в `click @e2` и `inspect @e2`. Параметр `depth` (default `1`) управляет раскрытием аналогично `capture`.
 
 ```json
 {
@@ -137,9 +137,9 @@ document.querySelectorAll('body, body *')
 - Неизвестные id тихо игнорируются. Если все id неизвестны — `tree = []`.
 - Id можно передавать с `@` или без (`@e3` = `e3`).
 
-### 4. Inspect — полные данные элемента
+### 4. Inspect — подробные данные элемента
 
-`inspect <elementId>` возвращает полную информацию по одному элементу:
+`inspect <elementId>` возвращает computed styles, диагностические CSS-источники и псевдо-элементы одного элемента. CSS-диагностика эвристическая и не моделирует полностью специфичность, каскад слоёв и все правила CSS:
 
 ```json
 {
@@ -159,8 +159,8 @@ document.querySelectorAll('body, body *')
 ```
 
 - `computedStyles` — только свойства не из `user-agent`;
-- `cascade` — только `inline`, `stylesheet`, `inherited`;
-- `pseudo` — полные данные псевдо-элементов `::before` и `::after`.
+- `cascade` — best-effort источники `inline`, `stylesheet`, `inherited`, не полный движок каскада;
+- `pseudo` — вычисленные данные псевдо-элементов `::before` и `::after`.
 
 ### 5. Viewport
 
@@ -197,7 +197,7 @@ POST /sessions/:name/capture
 - `inherited` — унаследовано от родителя;
 - `user-agent` — исключается из результата.
 
-Оптимизация: один проход по CSS-правилам на элемент, затем быстрое определение source для каждого свойства.
+Диагностика использует доступные CSS rules и `getComputedStyle`; cross-origin stylesheet и часть сложных cascade cases могут быть недоступны или классифицированы приблизительно.
 
 ### 7. Bounding box псевдо-элементов
 
@@ -208,10 +208,11 @@ POST /sessions/:name/capture
 Демон — отдельный Node.js процесс, который:
 
 - запускается командой `viewprint daemon start [--port 7345]`;
-- хранит pid-файл в `~/.viewprint/daemon.pid`;
-- пишет лог в `~/.viewprint/daemon.log`;
-- слушает HTTP API на `localhost:<port>`;
-- держит BrowserSession открытой между запросами.
+- хранит per-port PID, random bearer token и instance ID в `~/.viewprint/daemons` с правами `0600` (каталог `0700`);
+- пишет отдельный per-port лог;
+- слушает HTTP API только на `127.0.0.1:<port>`; все маршруты защищены bearer token, JSON body ограничен 1 MiB;
+- останавливается только после проверки PID, command line и instance ID;
+- держит BrowserSession открытой между запросами. Управление процессами поддерживается на macOS и Linux.
 
 CLI работает как клиент: проверяет демон, автозапускает, отправляет запросы.
 
@@ -225,8 +226,8 @@ CLI работает как клиент: проверяет демон, авт�
 | POST | `/sessions/:name/click` | `{ elementId: string }` | `{ clicked: true }` |
 | GET | `/sessions/:name/status` | — | `{ url?: string; elementCount: number }` |
 | DELETE | `/sessions/:name` | — | `{ closed: true }` |
-| GET | `/health` | — | `{ ok: true }` |
-| POST | `/shutdown` | — | `{ shuttingDown: true }` |
+| GET | `/health` | Bearer token | `{ ok: true, instanceId: string }` |
+| POST | `/shutdown` | Bearer token | `{ shuttingDown: true }` |
 
 ### 10. CLI
 
@@ -241,6 +242,7 @@ viewprint -s <session> close
 viewprint daemon start [--port 7345]
 viewprint daemon stop
 viewprint daemon status
+viewprint daemon restart
 ```
 
 ### 11. Тестирование
@@ -318,7 +320,7 @@ State сессии (`~/.viewprint/sessions/<name>/state.json`) включает 
 
 ### 16. MCP server
 
-`viewprint mcp` запускает Model Context Protocol сервер через stdio.
+`viewprint mcp` запускает Model Context Protocol сервер через официальный `@modelcontextprotocol/server` v2 и stdio transport.
 
 Реализует JSON-RPC 2.0 методы:
 
@@ -326,13 +328,13 @@ State сессии (`~/.viewprint/sessions/<name>/state.json`) включает 
 - `tools/list` — список инструментов.
 - `tools/call` — вызов инструмента.
 
-Tools: `capture`, `snapshot`, `click`, `fill`, `inspect`, `eval`, `read`, `status`.
+Tools: `capture`, `snapshot`, `click`, `fill`, `inspect`, `eval`, `read`, `status`, `diff_last`, `frames_list`, `frame_switch`, `frame_main`, `set_dialog_handler`.
 
 ### 17. Advanced: dialogs, diff
 
 **Dialogs:**
 
-- `dialog --handler '{"accept":true,"promptText":"ok"}'` — устанавливает обработчик alert/confirm/prompt.
+- `dialog [--accept|--dismiss] [--prompt-text <text>]` — устанавливает handler alert/confirm/prompt.
 
 **Diff:**
 
@@ -343,7 +345,7 @@ Tools: `capture`, `snapshot`, `click`, `fill`, `inspect`, `eval`, `read`, `statu
 - [x] `capture` возвращает облегчённое дерево без `computedStyles`, `cascade` и `pseudo`.
 - [x] `capture` и `snapshot` принимают параметр `depth` (default `1`); свёрнутые ветки показывают `childrenCount` и `children: []`.
 - [x] `capture` и `snapshot` принимают параметр `expand: string[]` — список id, которые становятся корнями `tree` (вместо body). depth отсчитывается от каждого root. Неизвестные id тихо игнорируются.
-- [x] `inspect <elementId>` возвращает полные данные элемента со всеми CSS-данными и псевдо-элементами.
+- [x] `inspect <elementId>` возвращает computed styles, best-effort CSS-source диагностику и данные псевдо-элементов; полный расчёт каскада не обещается.
 - [x] `capture` с `--viewport 1920x1080` возвращает дерево с указанным viewport.
 - [x] `click` возвращает `{ clicked: true }` и не пересчитывает граф.
 - [x] Дерево содержит только `<body>` и потомков; `<html>`/`<head>` исключены.

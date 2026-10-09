@@ -9,6 +9,8 @@ export function buildGraph(
     hasQuery: boolean = false
 ): Graph {
     const nodes: Record<string, SnapshotElementNode> = {}
+    const childrenByParent = new Map<string, string[]>()
+    let rootId: string | undefined
 
     for (const raw of rawData) {
         nodes[raw.id] = {
@@ -21,40 +23,46 @@ export function buildGraph(
             text: raw.text,
             boundingBox: raw.boundingBox
         }
+
+        if (raw.parentId === undefined) {
+            rootId ??= raw.id
+        } else {
+            const childIds = childrenByParent.get(raw.parentId) ?? []
+            childIds.push(raw.id)
+            childrenByParent.set(raw.parentId, childIds)
+        }
     }
 
-    // If expand is set OR a query was given, never fall back to body as a root.
-    // An empty result (no matching ids) returns an empty tree.
     if (expand.size > 0 || hasQuery) {
         const tree: CaptureNode[] = []
         for (const id of expand) {
             if (nodes[id]) {
-                tree.push(buildCaptureNode(id, nodes, 0, depth))
+                tree.push(buildCaptureNode(id, nodes, childrenByParent, 0, depth))
             }
         }
         return { url, viewport, tree }
     }
 
-    // Default behaviour: root = body.
-    const root = Object.values(nodes).find((node) => node.parentId === undefined)
-    if (!root) {
+    if (rootId === undefined) {
         return { url, viewport, tree: [] }
     }
+
     return {
         url,
         viewport,
-        tree: [buildCaptureNode(root.id, nodes, 0, depth)]
+        tree: [buildCaptureNode(rootId, nodes, childrenByParent, 0, depth)]
     }
 }
 
 function buildCaptureNode(
     id: string,
     nodes: Record<string, SnapshotElementNode>,
+    childrenByParent: Map<string, string[]>,
     level: number,
     maxDepth: number
 ): CaptureNode {
     const node = nodes[id]
-    const childIds = collectDirectChildIds(nodes, id)
+    const childIds = childrenByParent.get(id) ?? []
 
     const base: CaptureNode = {
         id: node.id,
@@ -76,16 +84,7 @@ function buildCaptureNode(
     return {
         ...base,
         children: childIds.map((childId) =>
-            buildCaptureNode(childId, nodes, level + 1, maxDepth)
+            buildCaptureNode(childId, nodes, childrenByParent, level + 1, maxDepth)
         )
     }
-}
-
-function collectDirectChildIds(
-    nodes: Record<string, SnapshotElementNode>,
-    parentId: string
-): string[] {
-    return Object.values(nodes)
-        .filter((node) => node.parentId === parentId)
-        .map((node) => node.id)
 }

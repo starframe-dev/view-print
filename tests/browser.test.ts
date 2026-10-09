@@ -62,8 +62,8 @@ describe('BrowserSession', () => {
     it('defaults to headless and supports headed launch configuration', () => {
         expect(new BrowserSession('headless-default').isHeadless()).toBe(true)
         expect(new BrowserSession('headed-session', { headless: false }).isHeadless()).toBe(false)
-        expect(getBrowserLaunchOptions()).toEqual({ channel: 'chrome', headless: true })
-        expect(getBrowserLaunchOptions({ headless: false })).toEqual({ channel: 'chrome', headless: false })
+        expect(getBrowserLaunchOptions()).toEqual({ headless: true })
+        expect(getBrowserLaunchOptions({ headless: false })).toEqual({ headless: false })
     })
 
     it('reports whether the browser page is still usable', async () => {
@@ -471,12 +471,12 @@ describe('BrowserSession', () => {
         const port = (server.address() as AddressInfo).port
         const url = `http://localhost:${port}`
         const sessionName = 'test-background-cookie-persistence'
-        const session = await createBrowserSession(sessionName)
+        const session = await createBrowserSession(sessionName, { stateCheckpointIntervalMs: 50 })
 
         try {
             await session.capture(url)
             await session.getPage()!.context().addCookies([{ name: 'background', value: 'saved', url }])
-            await new Promise<void>((resolve) => setTimeout(resolve, 1500))
+            await new Promise<void>((resolve) => setTimeout(resolve, 120))
 
             const savedState = loadSession(sessionName)
             expect(savedState.cookies.some((cookie) => cookie.name === 'background' && cookie.value === 'saved')).toBe(true)
@@ -732,10 +732,151 @@ describe('BrowserSession', () => {
             await session.start()
             await session.capture(testPage)
             const beforeUrl = session.getLastGraph()?.url
-            // Pass a different URL with noLoad: it should be IGNORED
             const fakeUrl = 'https://should-not-load.example.com/'
             await session.capture(fakeUrl, undefined, 1, new Set(), undefined, { noLoad: true })
             expect(session.getLastGraph()?.url).toBe(beforeUrl)
+        } finally {
+            await session.close()
+        }
+    })
+
+    it('restores the saved URL and page contents after a session restart', async () => {
+        const sessionName = `restore-url-${Date.now()}`
+        const savedUrl = `data:text/html,${encodeURIComponent('<html><body><main>Recovered page</main></body></html>')}`
+        const first = await createBrowserSession(sessionName)
+        await first.capture(savedUrl, undefined, 9999)
+        await first.close()
+
+        const restored = await createBrowserSession(sessionName)
+        try {
+            const graph = await restored.capture(undefined, undefined, 9999)
+            expect(graph.url).toBe(savedUrl)
+            expect(await restored.eval('document.querySelector("main")?.textContent')).toBe('Recovered page')
+        } finally {
+            await restored.close()
+        }
+    })
+
+    it('restores localStorage before the application script runs', async () => {
+        const server = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<html><head><script>window.__bootToken = localStorage.getItem("token")</script></head><body></body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const url = `http://localhost:${(server.address() as AddressInfo).port}`
+        const sessionName = `restore-storage-${Date.now()}`
+        const first = await createBrowserSession(sessionName)
+        await first.capture(url)
+        await first.setLocalStorage('token', 'ready-before-js')
+        await first.close()
+
+        const restored = await createBrowserSession(sessionName)
+        try {
+            await restored.capture()
+            expect(await restored.eval('window.__bootToken')).toBe('ready-before-js')
+        } finally {
+            await restored.close()
+            server.close()
+        }
+    })
+
+    it('keeps localStorage scoped to each origin', async () => {
+        const makeServer = (): http.Server => http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<html><body>Origin</body></html>')
+        })
+        const firstServer = makeServer()
+        const secondServer = makeServer()
+        await Promise.all([
+            new Promise<void>((resolve) => firstServer.listen(0, resolve)),
+            new Promise<void>((resolve) => secondServer.listen(0, resolve))
+        ])
+        const firstUrl = `http://localhost:${(firstServer.address() as AddressInfo).port}`
+        const secondUrl = `http://localhost:${(secondServer.address() as AddressInfo).port}`
+        const session = await createBrowserSession(`origin-storage-${Date.now()}`)
+        try {
+            await session.capture(firstUrl)
+            await session.setLocalStorage('origin', 'first')
+            await session.capture(secondUrl)
+            expect(await session.getLocalStorage()).toEqual({})
+            await session.setLocalStorage('origin', 'second')
+            await session.capture(firstUrl)
+            expect(await session.getLocalStorage()).toEqual({ origin: 'first' })
+        } finally {
+            await session.close()
+            firstServer.close()
+            secondServer.close()
+        }
+    })
+
+    it('restores sessionStorage independently for each tab', async () => {
+        const server = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<html><body>Tab</body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const url = `http://localhost:${(server.address() as AddressInfo).port}`
+        const sessionName = `tab-storage-${Date.now()}`
+        const first = await createBrowserSession(sessionName)
+        await first.capture(url)
+        await first.setSessionStorage('tab', 'first')
+        await first.newTab(url)
+        await first.setSessionStorage('tab', 'second')
+        await first.close()
+
+        const restored = await createBrowserSession(sessionName)
+        try {
+            expect(await restored.capture()).toBeDefined()
+            expect(await restored.getSessionStorage()).toEqual({ tab: 'second' })
+            await restored.switchTab(0)
+            await restored.capture()
+            expect(await restored.getSessionStorage()).toEqual({ tab: 'first' })
+        } finally {
+            await restored.close()
+            server.close()
+        }
+    })
+
+    it('switches frames for capture, inspect, actions, query actions, and read', async () => {
+        const server = http.createServer((req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end(req.url === '/frame'
+                ? '<html><body><button id="inside">Frame button</button><input id="frame-input"></body></html>'
+                : '<html><body><iframe id="child" src="/frame"></iframe><button id="outside">Main button</button></body></html>')
+        })
+        await new Promise<void>((resolve) => server.listen(0, resolve))
+        const url = `http://localhost:${(server.address() as AddressInfo).port}`
+        const session = await createBrowserSession(`frame-target-${Date.now()}`)
+        try {
+            await session.capture(url, undefined, 9999)
+            await session.switchFrame('#child')
+            const frameGraph = await session.capture(undefined, undefined, 9999)
+            const frameButton = findByAttribute(frameGraph.tree, 'id', 'inside')
+            expect(frameButton).toBeDefined()
+            expect((await session.inspect(frameButton!.id))?.text).toBe('Frame button')
+            await session.click(frameButton!.id)
+            await session.fillQuery('#frame-input', 'frame value')
+            expect(await session.eval('document.querySelector("#frame-input").value')).toBe('frame value')
+            expect(await session.read('text')).toContain('Frame button')
+
+            await session.switchFrameMain()
+            const mainGraph = await session.capture(undefined, undefined, 9999)
+            expect(findByAttribute(mainGraph.tree, 'id', 'outside')).toBeDefined()
+        } finally {
+            await session.close()
+            server.close()
+        }
+    })
+
+    it('does not mutate or trust an existing data-viewprint-id attribute', async () => {
+        const page = `data:text/html,${encodeURIComponent('<html><body><button data-viewprint-id="e1">Own ref</button></body></html>')}`
+        const session = await createBrowserSession(`ref-registry-${Date.now()}`)
+        try {
+            const graph = await session.capture(page, undefined, 9999)
+            const button = findByTag(graph.tree, 'button')
+            expect(button?.id).not.toBe('e1')
+            expect(await session.eval('document.querySelector("button").getAttribute("data-viewprint-id")')).toBe('e1')
+            await session.click(button!.id)
         } finally {
             await session.close()
         }

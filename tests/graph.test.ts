@@ -253,4 +253,20 @@ describe('buildGraph', () => {
         expect(graph.tree[0].children[0].children).toEqual([])
         expect(graph.tree[0].children[0].childrenCount).toBe(1)
     })
+
+    it('builds a large synthetic graph without quadratic child scans', () => {
+        const childCount = 20_000
+        const raw: RawSnapshotElement[] = [createRawElement('root', undefined, 'body')]
+        for (let index = 0; index < childCount; index++) {
+            raw.push(createRawElement(`child-${index}`, 'root'))
+        }
+
+        const startedAt = performance.now()
+        const graph = buildGraph(raw, 'https://example.com', { width: 1280, height: 720 }, 1)
+        const durationMs = performance.now() - startedAt
+
+        expect(graph.tree[0].children).toHaveLength(childCount)
+        expect(graph.tree[0].childrenCount).toBe(childCount)
+        expect(durationMs).toBeLessThan(2_000)
+    })
 })

@@ -4,12 +4,16 @@ tests/
 *.test.d.ts
 *.test.js.map
 *.test.d.ts.map
+*.map
 
 # Config files
 vitest.config.ts
 tsconfig.json
 pnpm-workspace.yaml
 .gitignore
+specs/
+scripts/
+.lore/
 
 # Source maps for tests
 *.tsbuildinfo

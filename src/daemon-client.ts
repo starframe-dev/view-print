@@ -1,32 +1,52 @@
 import type { ActionReport, ActionTiming, ElementNode, Graph, NetworkRoute, SessionState, Snapshot, TraceReport } from './types.js'
 import type { Cookie } from 'playwright'
-import type { WaitCondition } from './browser.js'
+import type { NetworkTrackingOptions, WaitCondition } from './browser.js'
+import type { GraphDiff } from './diff.js'
+import { readDaemonMetadata } from './daemon-metadata.js'
 
 export interface DaemonClientOptions {
     port: number
+    token?: string
 }
 
 export class DaemonClient {
     private baseUrl: string
+    private token?: string
 
     constructor(options: DaemonClientOptions) {
-        this.baseUrl = `http://localhost:${options.port}`
+        this.baseUrl = `http://127.0.0.1:${options.port}`
+        this.token = options.token ?? readDaemonMetadata(options.port)?.token
+    }
+
+    private buildUrl(path: string): string {
+        const match = path.match(/^\/sessions\/([^/?]+)(.*)$/)
+        const safePath = match
+            ? `/sessions/${encodeURIComponent(match[1])}${match[2]}`
+            : path
+        return `${this.baseUrl}${safePath}`
+    }
+
+    private headers(json = false): HeadersInit {
+        return {
+            ...(json ? { 'Content-Type': 'application/json' } : {}),
+            ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
+        }
     }
 
     private async post(path: string, body: unknown): Promise<Response> {
-        return fetch(`${this.baseUrl}${path}`, {
+        return fetch(this.buildUrl(path), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: this.headers(true),
             body: JSON.stringify(body)
         })
     }
 
     private async get(path: string): Promise<Response> {
-        return fetch(`${this.baseUrl}${path}`)
+        return fetch(this.buildUrl(path), { headers: this.headers() })
     }
 
     private async del(path: string): Promise<Response> {
-        return fetch(`${this.baseUrl}${path}`, { method: 'DELETE' })
+        return fetch(this.buildUrl(path), { method: 'DELETE', headers: this.headers() })
     }
 
     private async handleResponse(response: Response, action: string): Promise<unknown> {
@@ -36,9 +56,36 @@ export class DaemonClient {
         return response.json()
     }
 
-    async health(): Promise<boolean> {
+    async healthStatus(): Promise<{ ok: boolean; instanceId: string | null }> {
         try {
-            const response = await fetch(`${this.baseUrl}/health`)
+            const response = await fetch(this.buildUrl('/health'), { headers: this.headers() })
+            if (!response.ok) {
+                return { ok: false, instanceId: null }
+            }
+            const body: unknown = await response.json()
+            if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+                return { ok: false, instanceId: null }
+            }
+            const record = body as Record<string, unknown>
+            return {
+                ok: record.ok === true,
+                instanceId: typeof record.instanceId === 'string' ? record.instanceId : null
+            }
+        } catch {
+            return { ok: false, instanceId: null }
+        }
+    }
+
+    async health(): Promise<boolean> {
+        return (await this.healthStatus()).ok
+    }
+
+    async shutdown(): Promise<boolean> {
+        try {
+            const response = await fetch(this.buildUrl('/shutdown'), {
+                method: 'POST',
+                headers: this.headers()
+            })
             return response.ok
         } catch {
             return false
@@ -166,8 +213,8 @@ export class DaemonClient {
         return this.handleResponse(response, 'NetworkRequests') as Promise<{ requests: unknown[] }>
     }
 
-    async startNetworkTracking(session: string): Promise<{ tracking: boolean }> {
-        const response = await this.post(`/sessions/${session}/network/track/start`, {})
+    async startNetworkTracking(session: string, options: NetworkTrackingOptions = {}): Promise<{ tracking: boolean }> {
+        const response = await this.post(`/sessions/${session}/network/track/start`, options)
         return this.handleResponse(response, 'StartNetworkTracking') as Promise<{ tracking: boolean }>
     }
 
@@ -176,8 +223,8 @@ export class DaemonClient {
         return this.handleResponse(response, 'StopNetworkTracking') as Promise<{ tracking: boolean }>
     }
 
-    async startHar(session: string, path?: string): Promise<{ path: string }> {
-        const response = await this.post(`/sessions/${session}/network/har/start`, { path })
+    async startHar(session: string, path?: string, options: NetworkTrackingOptions = {}): Promise<{ path: string }> {
+        const response = await this.post(`/sessions/${session}/network/har/start`, { path, ...options })
         return this.handleResponse(response, 'StartHar') as Promise<{ path: string }>
     }
 
@@ -307,8 +354,21 @@ export class DaemonClient {
         return this.handleResponse(response, 'Read') as Promise<{ content: string }>
     }
 
+    async setDialogHandler(
+        session: string,
+        handler: { accept: boolean; promptText?: string }
+    ): Promise<{ handlerSet: boolean }> {
+        const response = await this.post(`/sessions/${session}/dialog`, { handler })
+        return this.handleResponse(response, 'Dialog') as Promise<{ handlerSet: boolean }>
+    }
+
+    async diffLast(session: string): Promise<{ diff: GraphDiff | null; message?: string }> {
+        const response = await this.get(`/sessions/${session}/diff/last`)
+        return this.handleResponse(response, 'Diff') as Promise<{ diff: GraphDiff | null; message?: string }>
+    }
+
     async close(session: string): Promise<void> {
-        const response = await fetch(`${this.baseUrl}/sessions/${session}`, { method: 'DELETE' })
+        const response = await this.del(`/sessions/${session}`)
         await this.handleResponse(response, 'Close')
     }
 
@@ -322,7 +382,7 @@ export class DaemonClient {
         return this.handleResponse(response, 'ExportSession') as Promise<SessionState>
     }
 
-    async importSession(session: string, state: SessionState, force: boolean = false): Promise<{ imported: boolean; session: string }> {
+    async importSession(session: string, state: unknown, force: boolean = false): Promise<{ imported: boolean; session: string }> {
         const response = await this.post(`/sessions/${session}/import`, { state, force })
         return this.handleResponse(response, 'ImportSession') as Promise<{ imported: boolean; session: string }>
     }

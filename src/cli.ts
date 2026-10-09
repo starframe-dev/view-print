@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Command } from 'commander'
 import { createDaemonClient } from './daemon-client.js'
 import {
@@ -12,14 +14,15 @@ import {
 } from './daemon-process.js'
 import { runMcpServer } from './mcp.js'
 import type { WaitCondition } from './browser.js'
-import type { NetworkRoute, SessionState } from './types.js'
+import type { NetworkRoute } from './types.js'
+import { getPackageVersion } from './version.js'
 
 const program = new Command()
 
 program
     .name('viewprint')
     .description('AI tool for extracting precise layout graphs from web pages')
-    .version('0.1.0')
+    .version(getPackageVersion())
     .option('-s, --session <name>', 'Session name')
 
 function getSessionName(): string {
@@ -41,19 +44,49 @@ async function getClient(): Promise<ReturnType<typeof createDaemonClient>> {
 }
 
 function parseViewport(value: string): { width: number; height: number } {
-    const match = value.match(/^(\d+)x(\d+)$/)
+    const match = value.match(/^([1-9]\d*)x([1-9]\d*)$/)
     if (!match) {
-        throw new Error('Invalid viewport format. Use WIDTHxHEIGHT, e.g. 1920x1080')
+        throw new Error('Invalid viewport format. Use positive WIDTHxHEIGHT integers, e.g. 1920x1080.')
     }
-    return { width: parseInt(match[1], 10), height: parseInt(match[2], 10) }
+    const width = Number(match[1])
+    const height = Number(match[2])
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) {
+        throw new Error('Invalid viewport format. Width and height must be safe integers.')
+    }
+    return { width, height }
 }
 
 function parseDepth(value: string): number {
-    const n = parseInt(value, 10)
-    if (Number.isNaN(n) || n < 1) {
+    if (!/^[1-9]\d*$/.test(value)) {
         throw new Error('Invalid depth. Use an integer >= 1.')
     }
-    return n
+    const depth = Number(value)
+    if (!Number.isSafeInteger(depth)) {
+        throw new Error('Invalid depth. Use a safe integer >= 1.')
+    }
+    return depth
+}
+
+function parsePort(value: string): number {
+    if (!/^\d+$/.test(value)) {
+        throw new Error('Invalid daemon port. Use an integer from 1 to 65535.')
+    }
+    const port = Number(value)
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+        throw new Error('Invalid daemon port. Use an integer from 1 to 65535.')
+    }
+    return port
+}
+
+function parseIdleTimeout(value: string): number {
+    if (!/^-?\d+$/.test(value)) {
+        throw new Error('Invalid idle timeout. Use an integer number of milliseconds.')
+    }
+    const timeout = Number(value)
+    if (!Number.isSafeInteger(timeout)) {
+        throw new Error('Invalid idle timeout. Use a safe integer number of milliseconds.')
+    }
+    return timeout
 }
 
 function parseExpand(value: string | undefined): string[] {
@@ -627,6 +660,37 @@ program
         console.log(JSON.stringify(status, null, 2))
     })
 
+const diff = program
+    .command('diff')
+    .description('Compare captured page graphs')
+
+diff
+    .command('last')
+    .description('Compare the previous graph with the current page')
+    .action(async () => {
+        const client = await getClient()
+        const result = await client.diffLast(getSessionName())
+        console.log(JSON.stringify(result, null, 2))
+    })
+
+program
+    .command('dialog')
+    .description('Configure automatic JavaScript dialog handling')
+    .option('--dismiss', 'Dismiss alert, confirm, and prompt dialogs')
+    .option('--accept', 'Accept alert, confirm, and prompt dialogs (default)')
+    .option('--prompt-text <text>', 'Text returned when accepting a prompt')
+    .action(async (options: { dismiss?: boolean; accept?: boolean; promptText?: string }) => {
+        if (options.dismiss && options.accept) {
+            throw new Error('Choose only one of --accept or --dismiss.')
+        }
+        const client = await getClient()
+        const result = await client.setDialogHandler(getSessionName(), {
+            accept: options.dismiss !== true,
+            ...(options.promptText === undefined ? {} : { promptText: options.promptText })
+        })
+        console.log(JSON.stringify(result, null, 2))
+    })
+
 const sessionCmd = program
     .command('session')
     .description('Manage saved session state')
@@ -670,7 +734,7 @@ sessionCmd
         }
 
         const client = await getClient()
-        const result = await client.importSession(getSessionName(), state as SessionState, options.force === true)
+        const result = await client.importSession(getSessionName(), state, options.force === true)
         console.log(JSON.stringify(result, null, 2))
     })
 
@@ -732,19 +796,17 @@ traceCmd
             actionsRaw = Buffer.concat(chunks).toString('utf8').trim()
         }
         if (!actionsRaw) {
-            console.error('trace run: --actions <json> is required (or pipe JSON via stdin)')
-            process.exit(1)
+            throw new Error('trace run: --actions <json> is required (or pipe JSON via stdin).')
         }
         let commands: unknown[]
         try {
             commands = JSON.parse(actionsRaw)
-        } catch (err) {
-            console.error(`trace run: invalid JSON: ${(err as Error).message}`)
-            process.exit(1)
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown parse error'
+            throw new Error(`trace run: invalid JSON: ${message}`)
         }
         if (!Array.isArray(commands)) {
-            console.error('trace run: --actions must be a JSON array')
-            process.exit(1)
+            throw new Error('trace run: --actions must be a JSON array.')
         }
 
         const client = await getClient()
@@ -754,9 +816,9 @@ traceCmd
         try {
             const start = await client.startTrace(session, categories)
             process.stderr.write(`# trace: started (${start.categories.length} categories)\n`)
-        } catch (err) {
-            console.error(`trace run: failed to start trace: ${(err as Error).message}`)
-            process.exit(1)
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error'
+            throw new Error(`trace run: failed to start trace: ${message}`)
         }
 
         let traceResult: { eventCount: number, sizeBytes: number, path: string }
@@ -768,10 +830,10 @@ traceCmd
             }
             traceResult = await client.stopTrace(session, options.output)
             process.stderr.write(`# trace: ${traceResult.eventCount} events, ${traceResult.sizeBytes} bytes -> ${traceResult.path}\n`)
-        } catch (err) {
+        } catch (error) {
             try { await client.stopTrace(session) } catch { /* ignore */ }
-            console.error(`trace run: ${(err as Error).message}`)
-            process.exit(1)
+            const message = error instanceof Error ? error.message : 'Unknown error'
+            throw new Error(`trace run: ${message}`)
         }
     })
 
@@ -834,9 +896,9 @@ daemon
     .option('--port <number>', 'Daemon port', `${getDaemonPort()}`)
     .option('--idle-timeout <ms>', 'Auto-shutdown after N ms of inactivity (0 to disable)')
     .action(async (options: { port: string; idleTimeout?: string }) => {
-        const port = parseInt(options.port, 10)
+        const port = parsePort(options.port)
         const idleTimeoutMs = options.idleTimeout !== undefined
-            ? parseInt(options.idleTimeout, 10)
+            ? parseIdleTimeout(options.idleTimeout)
             : getIdleTimeoutFromEnv()
         if (await isDaemonRunning(port)) {
             console.log(JSON.stringify({ port, running: true, idleTimeoutMs: idleTimeoutMs ?? null }, null, 2))
@@ -849,17 +911,36 @@ daemon
 daemon
     .command('stop')
     .description('Stop viewprint daemon')
-    .action(async () => {
-        await stopDaemonProcess(getDaemonPort())
-        console.log(JSON.stringify({ stopped: true }, null, 2))
+    .option('--port <number>', 'Daemon port', `${getDaemonPort()}`)
+    .action(async (options: { port: string }) => {
+        const port = parsePort(options.port)
+        await stopDaemonProcess(port)
+        console.log(JSON.stringify({ port, stopped: true }, null, 2))
     })
 
 daemon
     .command('status')
     .description('Show daemon status')
-    .action(async () => {
-        const running = await isDaemonRunning(getDaemonPort())
-        console.log(JSON.stringify({ port: getDaemonPort(), running }, null, 2))
+    .option('--port <number>', 'Daemon port', `${getDaemonPort()}`)
+    .action(async (options: { port: string }) => {
+        const port = parsePort(options.port)
+        const running = await isDaemonRunning(port)
+        console.log(JSON.stringify({ port, running }, null, 2))
+    })
+
+daemon
+    .command('restart')
+    .description('Restart the managed viewprint daemon')
+    .option('--port <number>', 'Daemon port', `${getDaemonPort()}`)
+    .option('--idle-timeout <ms>', 'Auto-shutdown after N ms of inactivity (0 to disable)')
+    .action(async (options: { port: string; idleTimeout?: string }) => {
+        const port = parsePort(options.port)
+        const idleTimeoutMs = options.idleTimeout !== undefined
+            ? parseIdleTimeout(options.idleTimeout)
+            : getIdleTimeoutFromEnv()
+        await stopDaemonProcess(port)
+        await startDaemonProcess({ port, idleTimeoutMs })
+        console.log(JSON.stringify({ port, restarted: true, idleTimeoutMs: idleTimeoutMs ?? null }, null, 2))
     })
 
 program
@@ -867,7 +948,7 @@ program
     .description('Re-link the global viewprint binary to the current project. Kills the daemon so the next call picks up new code.')
     .action(async () => {
         const { execFileSync } = await import('node:child_process')
-        const projectRoot = new URL('..', import.meta.url).pathname
+        const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
         try {
             await stopDaemonProcess(getDaemonPort())
         } catch {
@@ -878,4 +959,10 @@ program
         console.log(JSON.stringify({ reinstalled: true, path: projectRoot }, null, 2))
     })
 
-program.parse()
+try {
+    await program.parseAsync(process.argv)
+} catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown CLI error'
+    process.stderr.write(`Error: ${message}\n`)
+    process.exitCode = 1
+}

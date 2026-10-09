@@ -3,7 +3,21 @@
     "version": "0.2.0",
     "description": "AI tool for extracting precise layout graphs from web pages via Playwright",
     "type": "module",
-    "main": "./dist/index.js",
+    "main": "./dist/src/index.js",
+    "types": "./dist/src/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/src/index.d.ts",
+            "import": "./dist/src/index.js"
+        }
+    },
+    "files": [
+        "dist/package.json",
+        "dist/src/*.js",
+        "dist/src/*.d.ts",
+        "README.md",
+        "LICENSE"
+    ],
     "bin": {
         "viewprint": "./dist/src/cli.js"
     },
@@ -12,10 +26,12 @@
     },
     "scripts": {
         "build": "tsc",
+        "pretest": "pnpm run build",
+        "prepack": "pnpm run build",
         "dev": "tsc --watch",
         "test": "vitest run",
         "lint": "tsc --noEmit",
-        "reinstall-global": "viewprint daemon stop; pnpm add -g file:. --force",
+        "reinstall-global": "pnpm run build && (viewprint daemon stop || true) && pnpm add -g file:. --force",
         "deploy": "pnpm run lint && pnpm run test && pnpm run build && pnpm run reinstall-global"
     },
     "keywords": [
@@ -37,10 +53,15 @@
     },
     "homepage": "https://github.com/starframe-dev/view-print#readme",
     "dependencies": {
-        "@starframe/view-print": "link:",
+        "@modelcontextprotocol/server": "^2.3.1",
         "commander": "^12.1.0",
-        "playwright": "^1.45.0"
+        "playwright": "^1.45.0",
+        "zod": "^4.6.5"
     },
+    "engines": {
+        "node": ">=20"
+    },
+    "packageManager": "pnpm@11.9.0",
     "devDependencies": {
         "@types/node": "^20.14.0",
         "memfs": "^4.64.0",

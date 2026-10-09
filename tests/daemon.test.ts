@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { spawn, execSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
+import { randomBytes, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { BrowserSession } from '../src/browser.js'
 import { ViewPrintDaemon } from '../src/daemon.js'
 import { DaemonClient } from '../src/daemon-client.js'
+import { getProcessCommand, getProcessTreePids, isProcessAlive } from '../src/process-tree.js'
 import type { CaptureNode, ElementNode } from '../src/types.js'
 
 const testPage = `data:text/html,${encodeURIComponent(`
@@ -48,6 +50,17 @@ async function startDaemonOnRandomPort(daemon: ViewPrintDaemon): Promise<number>
     return daemon.getPort()
 }
 
+function createDaemonIdentity(): { token: string; instanceId: string } {
+    return { token: randomBytes(32).toString('hex'), instanceId: randomUUID() }
+}
+
+function daemonHeaders(token: string, json = false): Record<string, string> {
+    return {
+        Authorization: `Bearer ${token}`,
+        ...(json ? { 'Content-Type': 'application/json' } : {})
+    }
+}
+
 describe('ViewPrintDaemon', () => {
     let daemon: ViewPrintDaemon
     let client: DaemonClient
@@ -55,7 +68,7 @@ describe('ViewPrintDaemon', () => {
     beforeEach(async () => {
         daemon = new ViewPrintDaemon({ port: 0 })
         await daemon.start()
-        client = new DaemonClient({ port: daemon.getPort() })
+        client = new DaemonClient({ port: daemon.getPort(), token: daemon.getToken() })
     })
 
     afterEach(async () => {
@@ -63,9 +76,68 @@ describe('ViewPrintDaemon', () => {
     })
 
     it('responds to health check', async () => {
-        const response = await fetch(`http://localhost:${daemon.getPort()}/health`)
+        const response = await fetch(`http://127.0.0.1:${daemon.getPort()}/health`, {
+            headers: { Authorization: `Bearer ${daemon.getToken()}` }
+        })
         const body = await response.json()
-        expect(body).toEqual({ ok: true })
+        expect(body).toEqual({ ok: true, instanceId: daemon.getInstanceId() })
+    })
+
+    it('binds only to the IPv4 loopback address', () => {
+        const address = daemon.getAddress()
+        expect(address).not.toBeNull()
+        expect(typeof address).not.toBe('string')
+        expect((address as { address: string }).address).toBe('127.0.0.1')
+    })
+
+    it('rejects unauthenticated requests to health, eval, and shutdown', async () => {
+        const baseUrl = `http://127.0.0.1:${daemon.getPort()}`
+        const health = await fetch(`${baseUrl}/health`)
+        const evalResponse = await fetch(`${baseUrl}/sessions/auth-test/eval`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ script: '1 + 1' })
+        })
+        const shutdown = await fetch(`${baseUrl}/shutdown`, { method: 'POST' })
+
+        expect(health.status).toBe(401)
+        expect(evalResponse.status).toBe(401)
+        expect(shutdown.status).toBe(401)
+        expect(await client.health()).toBe(true)
+    })
+
+    it('rejects traversal session names and oversized or malformed JSON bodies', async () => {
+        const limitedDaemon = new ViewPrintDaemon({ port: 0, maxRequestBodyBytes: 32 })
+        await limitedDaemon.start()
+        const baseUrl = `http://127.0.0.1:${limitedDaemon.getPort()}`
+        const authHeaders = {
+            Authorization: `Bearer ${limitedDaemon.getToken()}`,
+            'Content-Type': 'application/json'
+        }
+        try {
+            const traversal = await fetch(`${baseUrl}/sessions/%2e%2e%2fx/capture`, {
+                method: 'POST',
+                headers: authHeaders,
+                body: '{}'
+            })
+            const oversized = await fetch(`${baseUrl}/sessions/limited/capture`, {
+                method: 'POST',
+                headers: authHeaders,
+                body: JSON.stringify({ url: 'x'.repeat(100) })
+            })
+            const malformed = await fetch(`${baseUrl}/sessions/limited/capture`, {
+                method: 'POST',
+                headers: authHeaders,
+                body: '{'
+            })
+
+            expect(traversal.status).toBe(400)
+            expect(oversized.status).toBe(413)
+            expect(malformed.status).toBe(400)
+            expect((await oversized.json()).error).toContain('too large')
+        } finally {
+            await limitedDaemon.stop()
+        }
     })
 
     it('captures lightweight layout tree at depth=1', async () => {
@@ -290,6 +362,25 @@ describe('ViewPrintDaemon', () => {
         expect(status.elementCount).toBeGreaterThan(0)
     })
 
+    it('returns added nodes through diff last via the daemon client', async () => {
+        const session = `diff-${Date.now()}`
+        await client.capture(session, testPage, undefined, 9999)
+        await client.eval(session, 'document.body.insertAdjacentHTML("beforeend", "<div>Added after capture</div>")')
+
+        const result = await client.diffLast(session)
+        expect(result.diff).not.toBeNull()
+        expect(result.diff?.added.length).toBeGreaterThan(0)
+    })
+
+    it('configures dialogs through the daemon client', async () => {
+        const session = `dialog-${Date.now()}`
+        await client.capture(session, testPage)
+        await client.setDialogHandler(session, { accept: true, promptText: 'accepted value' })
+
+        const result = await client.eval(session, 'prompt("Continue?")')
+        expect(result.result).toBe('accepted value')
+    })
+
     it('closes session', async () => {
         await client.capture('test-daemon', testPage)
         await client.close('test-daemon')
@@ -329,9 +420,10 @@ describe('ViewPrintDaemon', () => {
 
     it('updates lastActivityAt on each request', async () => {
         const before = daemon.getLastActivityAt()
-        // Wait to ensure timestamp difference
         await new Promise((resolve) => setTimeout(resolve, 10))
-        await fetch(`http://localhost:${daemon.getPort()}/health`)
+        await fetch(`http://127.0.0.1:${daemon.getPort()}/health`, {
+            headers: { Authorization: `Bearer ${daemon.getToken()}` }
+        })
         const after = daemon.getLastActivityAt()
         expect(after).toBeGreaterThan(before)
     })
@@ -359,7 +451,7 @@ describe('ViewPrintDaemon', () => {
             // Enable
             const enableRes = await fetch(`${baseUrl}/sessions/proftest/profile`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: daemonHeaders(daemon.getToken(), true),
                 body: JSON.stringify({ enabled: true })
             })
             expect(enableRes.status).toBe(200)
@@ -370,13 +462,15 @@ describe('ViewPrintDaemon', () => {
             // Trigger a capture
             const captureRes = await fetch(`${baseUrl}/sessions/proftest/capture`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: daemonHeaders(daemon.getToken(), true),
                 body: JSON.stringify({ url: testPage })
             })
             expect(captureRes.status).toBe(200)
 
             // Get timings
-            const getRes = await fetch(`${baseUrl}/sessions/proftest/profile`)
+            const getRes = await fetch(`${baseUrl}/sessions/proftest/profile`, {
+                headers: daemonHeaders(daemon.getToken())
+            })
             expect(getRes.status).toBe(200)
             const data = await getRes.json() as { timings: Array<{ action: string, durationMs: number }>, enabled: boolean }
             expect(data.enabled).toBe(true)
@@ -390,14 +484,17 @@ describe('ViewPrintDaemon', () => {
             // Disable
             const disableRes = await fetch(`${baseUrl}/sessions/proftest/profile`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: daemonHeaders(daemon.getToken(), true),
                 body: JSON.stringify({ enabled: false })
             })
             const disabled = await disableRes.json() as { profiling: boolean }
             expect(disabled.profiling).toBe(false)
 
             // Clear
-            const clearRes = await fetch(`${baseUrl}/sessions/proftest/profile`, { method: 'DELETE' })
+            const clearRes = await fetch(`${baseUrl}/sessions/proftest/profile`, {
+                method: 'DELETE',
+                headers: daemonHeaders(daemon.getToken())
+            })
             const cleared = await clearRes.json() as { cleared: number }
             expect(cleared.cleared).toBeGreaterThan(0)
         } finally {
@@ -409,7 +506,9 @@ describe('ViewPrintDaemon', () => {
         const daemon = new ViewPrintDaemon({ port: 0 })
         const port = await startDaemonOnRandomPort(daemon)
         try {
-            const res = await fetch(`http://localhost:${port}/sessions/tracetest/trace/report`)
+            const res = await fetch(`http://127.0.0.1:${port}/sessions/tracetest/trace/report`, {
+                headers: daemonHeaders(daemon.getToken())
+            })
             expect(res.status).toBe(200)
             const data = await res.json() as { report: { eventCount: number } }
             expect(data.report.eventCount).toBe(0)
@@ -423,21 +522,28 @@ describe('ViewPrintDaemon integration', () => {
     it('shuts down via POST /shutdown endpoint', async () => {
         const port = 17350
         const entryScript = path.resolve(__dirname, '../dist/src/daemon-entry.js')
-        const child = spawn(process.execPath, [entryScript, `--port=${port}`], {
-            stdio: ['ignore', 'pipe', 'pipe']
+        const identity = createDaemonIdentity()
+        const child = spawn(process.execPath, [entryScript, `--port=${port}`, `--instance-id=${identity.instanceId}`], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, VIEWPRINT_TOKEN: identity.token, VIEWPRINT_INSTANCE_ID: identity.instanceId }
         })
 
         try {
             // Wait for daemon to be ready
             for (let i = 0; i < 50; i++) {
                 try {
-                    const res = await fetch(`http://localhost:${port}/health`)
+                    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+                        headers: daemonHeaders(identity.token)
+                    })
                     if (res.ok) break
                 } catch { /* not ready yet */ }
                 await new Promise((resolve) => setTimeout(resolve, 100))
             }
 
-            const response = await fetch(`http://localhost:${port}/shutdown`, { method: 'POST' })
+            const response = await fetch(`http://127.0.0.1:${port}/shutdown`, {
+                method: 'POST',
+                headers: daemonHeaders(identity.token)
+            })
             expect(response.status).toBe(200)
 
             // Wait for process to actually exit
@@ -457,21 +563,29 @@ describe('ViewPrintDaemon integration', () => {
     it('auto-shuts down after idle timeout', async () => {
         const port = 17351
         const entryScript = path.resolve(__dirname, '../dist/src/daemon-entry.js')
-        // idle-timeout=500ms, check interval forced to 100ms via env for fast test
+        const identity = createDaemonIdentity()
         const child = spawn(process.execPath, [
             entryScript,
             `--port=${port}`,
+            `--instance-id=${identity.instanceId}`,
             '--idle-timeout=500'
         ], {
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...process.env, VIEWPRINT_IDLE_CHECK_INTERVAL_MS: '100' }
+            env: {
+                ...process.env,
+                VIEWPRINT_IDLE_CHECK_INTERVAL_MS: '100',
+                VIEWPRINT_TOKEN: identity.token,
+                VIEWPRINT_INSTANCE_ID: identity.instanceId
+            }
         })
 
         try {
             // Wait for daemon to be ready
             for (let i = 0; i < 50; i++) {
                 try {
-                    const res = await fetch(`http://localhost:${port}/health`)
+                    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+                        headers: daemonHeaders(identity.token)
+                    })
                     if (res.ok) break
                 } catch { /* not ready yet */ }
                 await new Promise((resolve) => setTimeout(resolve, 100))
@@ -491,60 +605,57 @@ describe('ViewPrintDaemon integration', () => {
         }
     }, 15000)
 
-    it('kills chrome-headless-shell descendants after shutdown', async () => {
+    it('kills bundled Chromium descendants after shutdown', async () => {
         const port = 17352
         const entryScript = path.resolve(__dirname, '../dist/src/daemon-entry.js')
-        const child = spawn(process.execPath, [entryScript, `--port=${port}`], {
+        const identity = createDaemonIdentity()
+        const child = spawn(process.execPath, [entryScript, `--port=${port}`, `--instance-id=${identity.instanceId}`], {
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...process.env, VIEWPRINT_PORT: String(port) }
+            env: {
+                ...process.env,
+                VIEWPRINT_PORT: String(port),
+                VIEWPRINT_TOKEN: identity.token,
+                VIEWPRINT_INSTANCE_ID: identity.instanceId
+            }
         })
 
-        // Snapshot chrome PIDs machine-wide BEFORE capture. We'll compare after shutdown
-        // to verify only our daemon's chrome descendants were killed (not chrome from other tests).
-        const listChromePids = (): Set<number> => {
-            const out = execSync(`ps -axo pid,command | grep -E "chrome-headless-shell" | grep -v grep || true`, { encoding: 'utf-8' })
-            const pids = new Set<number>()
-            for (const line of out.split('\n')) {
-                const trimmed = line.trim()
-                if (!trimmed) continue
-                const m = trimmed.match(/^(\d+)/)
-                if (m) {
-                    pids.add(parseInt(m[1], 10))
-                }
-            }
-            return pids
+        const listDaemonDescendants = (): Set<number> => new Set(getProcessTreePids(child.pid!))
+        const isChromiumProcess = (pid: number): boolean => {
+            const command = getProcessCommand(pid)
+            return command !== null && /chrom(e|ium)|headless/i.test(command)
         }
 
         try {
-            // Wait for daemon to be ready
             for (let i = 0; i < 50; i++) {
                 try {
-                    const res = await fetch(`http://localhost:${port}/health`)
+                    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+                        headers: daemonHeaders(identity.token)
+                    })
                     if (res.ok) break
                 } catch { /* not ready yet */ }
                 await new Promise((resolve) => setTimeout(resolve, 100))
             }
 
-            const beforeCapture = listChromePids()
+            const beforeCapture = listDaemonDescendants()
 
-            // Make a capture to spawn chromium
-            const response = await fetch(`http://localhost:${port}/sessions/cleanup-test/capture`, {
+            const response = await fetch(`http://127.0.0.1:${port}/sessions/cleanup-test/capture`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: daemonHeaders(identity.token, true),
                 body: JSON.stringify({ url: testPage })
             })
             expect(response.status).toBe(200)
 
-            // Wait a moment for chrome to fully spawn
             await new Promise((resolve) => setTimeout(resolve, 500))
 
-            // Confirm chrome processes were spawned (at least new ones vs beforeCapture)
-            const afterCapture = listChromePids()
-            const newDuringCapture = [...afterCapture].filter((p) => !beforeCapture.has(p))
-            expect(newDuringCapture.length).toBeGreaterThan(0)
+            const afterCapture = listDaemonDescendants()
+            const newDuringCapture = [...afterCapture].filter((pid) => !beforeCapture.has(pid))
+            expect(newDuringCapture.some(isChromiumProcess)).toBe(true)
 
             // Shutdown
-            const shutdownResponse = await fetch(`http://localhost:${port}/shutdown`, { method: 'POST' })
+            const shutdownResponse = await fetch(`http://127.0.0.1:${port}/shutdown`, {
+                method: 'POST',
+                headers: daemonHeaders(identity.token)
+            })
             expect(shutdownResponse.status).toBe(200)
 
             // Wait for daemon to exit
@@ -556,14 +667,10 @@ describe('ViewPrintDaemon integration', () => {
                 })
             })
 
-            // Give OS a moment to reap
             await new Promise((resolve) => setTimeout(resolve, 1000))
 
-            // Verify: all chrome we spawned during capture are now gone.
-            // Other chrome from other tests/processes may legitimately remain.
-            const afterShutdown = listChromePids()
             for (const pid of newDuringCapture) {
-                expect(afterShutdown.has(pid)).toBe(false)
+                expect(isProcessAlive(pid)).toBe(false)
             }
         } finally {
             try { child.kill('SIGKILL') } catch { /* ignore */ }
@@ -573,9 +680,15 @@ describe('ViewPrintDaemon integration', () => {
     it('accepts skipLoad and noLoad options via HTTP /capture', async () => {
         const port = 17353
         const entryScript = path.resolve(__dirname, '../dist/src/daemon-entry.js')
-        const child = spawn(process.execPath, [entryScript, `--port=${port}`], {
+        const identity = createDaemonIdentity()
+        const child = spawn(process.execPath, [entryScript, `--port=${port}`, `--instance-id=${identity.instanceId}`], {
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...process.env, VIEWPRINT_PORT: String(port) }
+            env: {
+                ...process.env,
+                VIEWPRINT_PORT: String(port),
+                VIEWPRINT_TOKEN: identity.token,
+                VIEWPRINT_INSTANCE_ID: identity.instanceId
+            }
         })
         child.stderr?.on('data', (chunk) => {
             process.stderr.write(`[daemon-err] ${chunk}`)
@@ -584,16 +697,18 @@ describe('ViewPrintDaemon integration', () => {
         try {
             for (let i = 0; i < 50; i++) {
                 try {
-                    const res = await fetch(`http://localhost:${port}/health`)
+                    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+                        headers: daemonHeaders(identity.token)
+                    })
                     if (res.ok) break
                 } catch { /* not ready yet */ }
                 await new Promise((resolve) => setTimeout(resolve, 100))
             }
 
             // First load — sets baseline
-            const r1 = await fetch(`http://localhost:${port}/sessions/httpload-test/capture`, {
+            const r1 = await fetch(`http://127.0.0.1:${port}/sessions/httpload-test/capture`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: daemonHeaders(identity.token, true),
                 body: JSON.stringify({ url: testPage })
             })
             expect(r1.status).toBe(200)
@@ -602,9 +717,9 @@ describe('ViewPrintDaemon integration', () => {
 
             // skipLoad with same URL → fast
             const t0 = Date.now()
-            const r2 = await fetch(`http://localhost:${port}/sessions/httpload-test/capture`, {
+            const r2 = await fetch(`http://127.0.0.1:${port}/sessions/httpload-test/capture`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: daemonHeaders(identity.token, true),
                 body: JSON.stringify({ url: testPage, options: { skipLoad: true } })
             })
             const elapsedSkip = Date.now() - t0
@@ -613,16 +728,19 @@ describe('ViewPrintDaemon integration', () => {
 
             // noLoad with different URL → ignores URL, stays on current
             const fakeUrl = 'https://should-not-load.invalid/'
-            const r3 = await fetch(`http://localhost:${port}/sessions/httpload-test/capture`, {
+            const r3 = await fetch(`http://127.0.0.1:${port}/sessions/httpload-test/capture`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: daemonHeaders(identity.token, true),
                 body: JSON.stringify({ url: fakeUrl, options: { noLoad: true } })
             })
             expect(r3.status).toBe(200)
             const g3 = await r3.json()
             expect(g3.url).toBe(testPage)
         } finally {
-            await fetch(`http://localhost:${port}/shutdown`, { method: 'POST' }).catch(() => {})
+            await fetch(`http://127.0.0.1:${port}/shutdown`, {
+                method: 'POST',
+                headers: daemonHeaders(identity.token)
+            }).catch(() => {})
             try { child.kill('SIGKILL') } catch { /* ignore */ }
         }
     }, 30000)

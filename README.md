@@ -10,11 +10,11 @@ AI-инструмент для извлечения точного графа в
 ## Возможности
 
 - 🗺️ **Capture** — облегчённое дерево элементов `<body>`, раскрытое до `--depth` (default 1, свёрнутые ветки показывают `childrenCount`). `--expand <ids>` задаёт альтернативные корни (body не показывается). Флаги `--skip-load` (пропустить `goto` если URL совпадает), `--no-goto` (capture на текущей странице, URL игнорируется) и `--no-headless` (показать окно Chromium для новой сессии). Опционально `--profile` для per-action timing и `--trace <path>` для Chrome perf trace.
-- 🔍 **Inspect** — полные `computedStyles`, `cascade` и псевдо-элементы для конкретного узла.
-- 🌳 **Snapshot** — accessibility tree с `@e1`, `@e2` refs, `--depth` и `--expand`. Узлы с HTML `id`/`class` содержат одноимённые top-level поля (`id`, `className`).
+- 🔍 **Inspect** — вычисленные `computedStyles`, диагностические cascade-источники и псевдо-элементы для конкретного узла. Cascade-диагностика не является полной реконструкцией CSS-специфичности.
+- 🌳 **Snapshot** — семантический DOM snapshot с `@e1`, `@e2` refs, `--depth` и `--expand`. Это не полное accessibility tree браузера. Узлы с HTML `id`/`class` содержат одноимённые top-level поля (`id`, `className`).
 - 🎯 **Actions** — `click`, `fill`, `type`, `hover`, `focus`, `press`, `scroll`, `scrollIntoView`, `wait`, `eval`.
 - 📜 **Batch** — JSON-массив команд за один запрос.
-- 🌐 **Network** — отслеживание, HAR, mock `route`/`unroute`.
+- 🌐 **Network** — вручную включаемое отслеживание (до 1000 запросов), HAR, mock `route`/`unroute`. Сбор response body по умолчанию выключен.
 - 🍪 **Storage** — cookies, localStorage, sessionStorage с persist между сессиями.
 - 🗂️ **Tabs & frames** — multi-tab навигация, frame switching.
 - 📸 **Screenshots** — page и element.
@@ -26,42 +26,46 @@ AI-инструмент для извлечения точного графа в
 
 ## Установка
 
+Требуется Node.js 20 или новее. Установите пакет и браузер Playwright:
+
 ```bash
-cd /Users/a/Space/Projects/Starframe/view-print
-pnpm install
+pnpm add @starframe/view-print
 pnpm exec playwright install chromium
+```
+
+Затем запускайте `viewprint --help`. Для разработки и локальных проверок:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
+pnpm run lint
+pnpm test
 pnpm run build
 ```
 
-Затем установите CLI wrapper:
-
-```bash
-ln -sf /Users/a/Space/Projects/Starframe/view-print/dist/src/cli.js ~/Space/Tools/bin/viewprint
-```
+Managed daemon process lifecycle поддерживается на macOS и Linux. Windows пока не поддерживается.
 
 ## Разработка
 
-После правок в `src/` нужно пересобрать и переустановить глобальный бинарь, а также убить daemon (иначе новый код не подхватится):
+После правок в `src/` пересоберите пакет. Для глобально установленного CLI используйте `viewprint reinstall`: команда остановит только подтверждённый managed daemon и переустановит пакет из текущего корня проекта.
 
 ```bash
-pnpm run deploy      # lint → test → build → reinstall-global
-# или
-pnpm run build && viewprint reinstall
+pnpm run build
+viewprint reinstall
 ```
-
-`viewprint reinstall` — перелинковывает глобальный бинарь на текущий проект и убивает daemon.
 
 ## Использование
 
 ### Демон
 
 ```bash
-viewprint daemon start              # localhost:7345
+viewprint daemon start              # 127.0.0.1:7345
 viewprint daemon status
+viewprint daemon restart
 viewprint daemon stop
 ```
 
-Если Chromium page/context закрылись из-за сбоя, daemon автоматически пересоздаёт stale-сессию при следующей команде и восстановит сохранённый state.
+Daemon принимает соединения только с `127.0.0.1` и требует bearer token, который хранится в приватной metadata пользователя. CLI управляет токеном автоматически. Если Chromium page/context закрылся из-за сбоя, следующая команда пересоздаёт stale-сессию и восстанавливает сохранённый state.
 
 ### Capture / snapshot
 
@@ -122,6 +126,8 @@ viewprint -s mypage network route --url "**/api/data" --body '{"ok":true}'
 viewprint -s mypage network har start --path ./capture.har
 ```
 
+Tracking хранит до 1000 запросов. Response-body capture выключен по умолчанию; при включении действует размерный лимит и редактирование чувствительных заголовков.
+
 ### Storage
 
 ```bash
@@ -149,7 +155,7 @@ viewprint -s mypage screenshot --element @e3 --padding 20     # с отступ�
 viewprint mcp
 ```
 
-Доступные tools: `capture`, `snapshot`, `click`, `fill`, `inspect`, `eval`, `read`, `status`.
+Сервер использует официальный `@modelcontextprotocol/server` v2 и stdio transport. Доступные tools: `capture`, `snapshot`, `click`, `fill`, `inspect`, `eval`, `read`, `status`, `diff_last`, `frames_list`, `frame_switch`, `frame_main`, `set_dialog_handler`.
 
 Подключение в `claude_desktop_config.json` / `~/.cursor/mcp.json`:
 
@@ -157,7 +163,7 @@ viewprint mcp
 {
   "mcpServers": {
     "view-print": {
-      "command": "/Users/a/Space/Projects/Starframe/view-print/dist/src/cli.js",
+      "command": "viewprint",
       "args": ["mcp"]
     }
   }
@@ -197,11 +203,11 @@ viewprint mcp
 
 **Snapshot-узел** содержит: `ref` (наш `id`), `tag`, `role`, `name`, `text`, `id` (HTML-атрибут, если есть), `className` (HTML-атрибут, если есть), `boundingBox`, `childrenCount`, `children`. Поля `id`/`className` — top-level, не внутри attributes, для удобного построения CSS-селекторов.
 
-**Полный узел (`inspect`)** дополнительно содержит: `computedStyles` (только non-`user-agent`), `cascade` (`inline`/`stylesheet`/`inherited`), `pseudo.before`, `pseudo.after`.
+**`inspect`** дополнительно содержит `computedStyles` (кроме `user-agent`), best-effort `cascade` (`inline`/`stylesheet`/`inherited`) и вычисленные `pseudo.before` / `pseudo.after`. Это не точная реконструкция CSS-каскада.
 
-**Accessibility:**
+**Семантические поля snapshot:**
 - `role` — явный `role` атрибут или implicit по тегу (`button`, `link`, `heading`, `textbox`, ...).
-- `name` — `aria-labelledby` → `aria-label` → `<label>` → `alt` → `title` → `placeholder` → текст кнопки/ссылки.
+- `name` — эвристический порядок: `aria-labelledby` → `aria-label` → `<label>` → `alt` → `title` → `placeholder` → текст кнопки/ссылки. Snapshot не является полным accessibility tree.
 
 **Текст:**
 - `text` заполняется только из **непосредственных** текстовых child-nodes (без рекурсии в дочерние элементы).
@@ -219,14 +225,15 @@ viewprint mcp
   "url": "https://example.com",
   "viewport": { "width": 1280, "height": 720 },
   "cookies": [...],
-  "localStorage": { "key": "value" },
-  "sessionStorage": { "key": "value" }
+  "localStorage": { "https://example.com": { "key": "value" } },
+  "sessionStorage": { "tab-1": { "https://example.com": { "key": "value" } } },
+  "tabs": [{ "id": "tab-1", "url": "https://example.com" }]
 }
 ```
 
-Cookies восстанавливаются через Playwright `storageState` (только cookies, без IndexedDB). localStorage / sessionStorage восстанавливаются через `page.evaluate` после `goto`. Viewport восстанавливается при запуске сессии. Состояние активной сессии автоматически синхронизируется на диск раз в секунду, поэтому cookies, изменённые асинхронно страницей, сохраняются без следующей команды CLI. При закрытии выполняется финальная синхронизация.
+Cookies восстанавливаются через Playwright `storageState` (только cookies, без IndexedDB). localStorage разделён по origin, sessionStorage — по вкладке и origin; значения вводятся через `addInitScript` до выполнения кода приложения. Старые плоские storage maps мигрируют при загрузке. URL и вкладки восстанавливаются при новом capture без URL. Изменения state записываются с debounce и периодическим checkpoint, а при закрытии выполняется финальная синхронизация.
 
-Синхронизация best-effort и не защищает от `SIGKILL`, отключения питания или истечения/отзыва cookies самим сайтом. JSON состояния не шифруется и может содержать авторизационные секреты.
+Состояние хранится с приватными правами файловой системы, но JSON не шифруется и может содержать авторизационные секреты. Синхронизация best-effort и не защищает от `SIGKILL`, отключения питания или истечения/отзыва cookies самим сайтом.
 
 ## Profiling
 
@@ -234,7 +241,7 @@ Cookies восстанавливаются через Playwright `storageState` 
 
 ### Chrome perf trace (CDP)
 
-`viewprint trace start` оборачивает `capture` в CDP `Tracing.start`/`Tracing.end` и пишет JSON в формате Chrome DevTools Trace Event Format. Открой в `chrome://tracing` или `ui.perfetto.dev`.
+`viewprint trace start` начинает CDP `Tracing`, а `trace stop` пишет JSON в формате Chrome DevTools Trace Event Format. Сбор ограничен 100 000 событиями; listeners, timer и CDP session освобождаются после stop/закрытия. Открой файл в `chrome://tracing` или `ui.perfetto.dev`.
 
 ```bash
 viewprint -s X trace start [--categories c1,c2,...]
@@ -294,6 +301,8 @@ echo '[["click","@e3"],["fill","@e5","hello"]]' | viewprint -s X trace run
 
 ### HTTP middleware
 
+Daemon слушает только `127.0.0.1`; все endpoints, включая health и shutdown, требуют bearer token. JSON body ограничен 1 MiB по умолчанию. Token и PID/instance metadata хранятся в `~/.viewprint/daemons` с правами `0600`, а каталог — `0700`.
+
 Каждый HTTP-запрос к daemon автоматически логируется как JSON-line в stderr. Опционально писать в файл через env `VIEWPRINT_HTTP_TRACE_FILE`.
 
 ## Архитектура
@@ -305,13 +314,14 @@ src/
 ├── daemon-client.ts # HTTP-клиент к демону
 ├── daemon-process.ts # Управление процессом демона
 ├── daemon-entry.ts  # Entry point демона
+├── daemon-metadata.ts # Private daemon identity/token metadata
 ├── browser.ts       # BrowserSession (Playwright)
 ├── extractor.ts     # extractSnapshotData, inspectElement (page.evaluate)
 ├── graph.ts         # buildGraph
 ├── tracing.ts       # Chrome perf trace (CDP Tracing)
 ├── session.ts       # State persistence (FS JSON)
 ├── diff.ts          # diffGraphs
-├── mcp.ts           # MCP server (stdio, JSON-RPC 2.0)
+├── mcp.ts           # MCP server (stdio, official @modelcontextprotocol/server v2)
 ├── index.ts         # Публичное API
 └── types.ts         # Типы
 ```
@@ -321,8 +331,8 @@ src/
 | Метод | Путь | Назначение |
 |-------|------|------------|
 | POST | `/sessions/:name/capture` | Capture дерева (`{ url?, viewport?, depth?, expand? }`) |
-| POST | `/sessions/:name/snapshot` | Accessibility snapshot дерева (`{ url?, viewport?, depth?, expand? }`) |
-| POST | `/sessions/:name/inspect` | Полные данные элемента |
+| POST | `/sessions/:name/snapshot` | Семантический DOM snapshot (`{ url?, viewport?, depth?, expand? }`) |
+| POST | `/sessions/:name/inspect` | Computed styles и диагностические данные элемента |
 | POST | `/sessions/:name/click` / `fill` / `type` / `hover` / `focus` / `press` / `scroll` / `scrollintoview` | Actions |
 | POST | `/sessions/:name/wait` | Wait condition |
 | POST | `/sessions/:name/eval` | Eval JS |
@@ -340,8 +350,8 @@ src/
 | GET | `/sessions/:name/diff/last` | Diff с предыдущим графом |
 | GET | `/sessions/:name/status` | Session status |
 | DELETE | `/sessions/:name` | Close session |
-| GET | `/health` | Health check |
-| POST | `/shutdown` | Shutdown daemon |
+| GET | `/health` | Authenticated health check |
+| POST | `/shutdown` | Authenticated daemon shutdown |
 | POST/GET/DELETE | `/sessions/:name/profile` | Per-action profiling enable/get/clear |
 | POST | `/sessions/:name/trace/start` | Start Chrome perf trace |
 | POST | `/sessions/:name/trace/stop` | Stop trace + write JSON file |
@@ -362,12 +372,15 @@ pnpm test       # vitest run
 
 - `tests/graph.test.ts` — `buildGraph` unit tests
 - `tests/session.test.ts` — state load/save с `memfs`
-- `tests/process-tree.test.ts` — `process-tree.ts` unit tests
-- `tests/tracing.test.ts` — `TracingSession` unit tests
-- `tests/browser.test.ts` — `BrowserSession` интеграционные (Playwright + http server)
-- `tests/daemon.test.ts` — `ViewPrintDaemon` HTTP API
+- `tests/process-tree.test.ts` — shell-free process-tree tests
+- `tests/tracing.test.ts` — bounded trace cleanup с fake CDP и моками FS
+- `tests/mcp.test.ts` — официальный MCP v2 transport и tool registration
+- `tests/cli.test.ts` — CLI async parser и managed daemon lifecycle
+- `tests/browser.test.ts` — `BrowserSession` интеграционные (Playwright + локальный HTTP server)
+- `tests/daemon.test.ts` — auth/body limits, session HTTP API, diff/dialog и daemon shutdown
+- `scripts/smoke-package.mjs` — tarball whitelist, install/import, CLI и recovery smoke
 
-**87/87 тестов passing**.
+Число passing tests сверяйте по выводу `pnpm test`; release smoke дополнительно устанавливает tarball и проверяет библиотечный import и daemon lifecycle.
 
 ### Принципы
 
@@ -380,7 +393,7 @@ pnpm test       # vitest run
 
 ### IndexedDB ошибка в data: URL
 
-`storageState` с `origins` восстанавливает IndexedDB, что запрещено на `data:`. Решение: `buildStorageState` возвращает только cookies; localStorage/sessionStorage восстанавливаются через `page.evaluate`.
+`storageState` с `origins` восстанавливает IndexedDB, что запрещено на `data:`. Решение: `buildStorageState` сохраняет только cookies и localStorage; sessionStorage восстанавливается `addInitScript`-ом до запуска кода страницы.
 
 ### `Object.entries(localStorage)` пустой
 
@@ -394,9 +407,9 @@ pnpm test       # vitest run
 
 `waitForLoadState('networkidle')` не срабатывает на `data:`. Решение: `page.waitForTimeout(100)`.
 
-### Висящие chrome-headless-shell после остановки
+### Висящие процессы Chromium после остановки
 
-`BrowserSession.close()` использует тройную страховку: graceful Playwright close → `killProcessTree(browserPid)` (если Playwright отдал PID через `launchServer`) → `killChromeProcessesByUserDataDir(dir)` (поиск по `ps | grep --user-data-dir`). Дополнительно `daemon.stop()` вызывает `killRemainingDescendants()` (SIGKILL всем потомкам демона через `pgrep -P` рекурсивно), а `daemon-entry.ts` `process.on('exit')` синхронно SIGKILL-ит потомков если event loop умер до async cleanup.
+`BrowserSession.close()` закрывает Playwright browser server, затем при необходимости завершает browser process tree и процессы с уникальным user-data directory. Process lookup использует `execFileSync` с аргументами без shell interpolation. Managed daemon останавливается только после проверки PID, command line и instance ID; process management явно поддержан на macOS и Linux.
 
 ## Лицензия
 

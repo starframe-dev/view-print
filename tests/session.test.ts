@@ -1,5 +1,6 @@
+import fs from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
-import { exportSession, importSession, loadSession, renameSession, saveSession, sessionExists } from '../src/session.js'
+import { deleteSession, exportSession, getSessionPath, importSession, loadSession, normalizeSessionState, renameSession, saveSession, sessionExists } from '../src/session.js'
 
 vi.mock('node:fs', async () => {
     const { vol } = await import('memfs')
@@ -33,8 +34,10 @@ describe('session', () => {
             url: 'https://example.com',
             viewport: { width: 1920, height: 1080 },
             cookies: [{ name: 'session', value: 'abc', domain: 'example.com', path: '/' }],
-            localStorage: { token: 'xyz' },
-            sessionStorage: { csrf: '123' }
+            localStorage: { 'https://example.com': { token: 'xyz' } },
+            sessionStorage: { 'tab-1': { 'https://example.com': { csrf: '123' } } },
+            tabs: [{ id: 'tab-1', url: 'https://example.com' }],
+            activeTabId: 'tab-1'
         }
 
         saveSession(state)
@@ -43,8 +46,8 @@ describe('session', () => {
         expect(loaded.url).toBe('https://example.com')
         expect(loaded.viewport).toEqual({ width: 1920, height: 1080 })
         expect(loaded.cookies).toEqual([{ name: 'session', value: 'abc', domain: 'example.com', path: '/' }])
-        expect(loaded.localStorage).toEqual({ token: 'xyz' })
-        expect(loaded.sessionStorage).toEqual({ csrf: '123' })
+        expect(loaded.localStorage).toEqual({ 'https://example.com': { token: 'xyz' } })
+        expect(loaded.sessionStorage).toEqual({ 'tab-1': { 'https://example.com': { csrf: '123' } } })
     })
 
     it('handles missing fields gracefully', async () => {
@@ -66,7 +69,7 @@ describe('session', () => {
     it('renames, exports and imports complete state', async () => {
         const { vol } = await import('memfs')
         vol.reset()
-        const state = {
+        const legacyState = {
             name: 'source',
             url: 'https://example.com',
             viewport: { width: 1440, height: 900 },
@@ -74,6 +77,7 @@ describe('session', () => {
             localStorage: { theme: 'dark' },
             sessionStorage: { tab: 'home' }
         }
+        const state = normalizeSessionState(legacyState, 'source')
 
         saveSession(state)
         renameSession('source', 'renamed')
@@ -89,11 +93,46 @@ describe('session', () => {
         expect(exportSession('imported')).toEqual({ ...state, name: 'imported' })
     })
 
+    it('migrates legacy flat storage into origin and tab scoped state', () => {
+        const migrated = normalizeSessionState({
+            url: 'https://example.com/path',
+            localStorage: { token: 'secret' },
+            sessionStorage: { tab: 'home' }
+        }, 'legacy')
+
+        expect(migrated.localStorage).toEqual({ 'https://example.com': { token: 'secret' } })
+        expect(migrated.sessionStorage).toEqual({ 'tab-1': { 'https://example.com': { tab: 'home' } } })
+        expect(migrated.tabs).toEqual([{ id: 'tab-1', url: 'https://example.com/path' }])
+    })
+
     it('rejects invalid imported state', async () => {
         const { vol } = await import('memfs')
         vol.reset()
 
         expect(() => importSession('invalid', { localStorage: { token: 123 } })).toThrow('localStorage.token')
         expect(() => importSession('invalid', { viewport: { width: 0, height: 100 } })).toThrow('Invalid viewport')
+    })
+
+    it.each(['../x', '/tmp/x', 'foo/bar', 'foo\\bar'])('rejects session path traversal name %s', (name) => {
+        expect(() => getSessionPath(name)).toThrow('Invalid session name')
+        expect(() => sessionExists(name)).toThrow('Invalid session name')
+        expect(() => deleteSession(name)).toThrow('Invalid session name')
+    })
+
+    it('writes private directories and state files atomically', async () => {
+        const { vol } = await import('memfs')
+        vol.reset()
+        saveSession(normalizeSessionState({ url: 'https://example.com' }, 'private'))
+
+        const rootMode = fs.statSync('/home/test/.viewprint').mode & 0o777
+        const sessionsMode = fs.statSync('/home/test/.viewprint/sessions').mode & 0o777
+        const sessionMode = fs.statSync('/home/test/.viewprint/sessions/private').mode & 0o777
+        const stateMode = fs.statSync(getSessionPath('private')).mode & 0o777
+
+        expect(rootMode).toBe(0o700)
+        expect(sessionsMode).toBe(0o700)
+        expect(sessionMode).toBe(0o700)
+        expect(stateMode).toBe(0o600)
+        expect(fs.readdirSync('/home/test/.viewprint/sessions/private')).toEqual(['state.json'])
     })
 })

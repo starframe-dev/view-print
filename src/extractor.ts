@@ -1,33 +1,43 @@
 import type { BoundingBox, CascadeEntry, ElementNode, PseudoElementNode, RawSnapshotElement } from './types.js'
 
-interface ViewPrintWindow extends Window {
-    __viewPrintNextElementId?: number
+interface ElementRegistry {
+    nextId: number
+    ids: WeakMap<Element, string>
+    elements: Map<string, WeakRef<Element>>
 }
 
 export function extractSnapshotData(): RawSnapshotElement[] {
     const elements = Array.from(document.querySelectorAll('body, body *'))
     const result: RawSnapshotElement[] = []
-    const elementToId = new Map<Element, string>()
+    const registryHost = window as unknown as Record<PropertyKey, unknown>
+    const registryKey = Symbol.for('starframe.viewprint.element-registry.v1')
+    let registry = registryHost[registryKey] as ElementRegistry | undefined
+    if (!registry) {
+        registry = {
+            nextId: 1,
+            ids: new WeakMap<Element, string>(),
+            elements: new Map<string, WeakRef<Element>>()
+        }
+        Object.defineProperty(registryHost, registryKey, { value: registry })
+    }
     const idsInSnapshot = new Set<string>()
-    const viewPrintWindow = window as ViewPrintWindow
-    let nextElementId = viewPrintWindow.__viewPrintNextElementId ?? 1
+    if (registry.elements.size > 4_096) {
+        for (const [id, element] of registry.elements) {
+            if (!element.deref()) {
+                registry.elements.delete(id)
+            }
+        }
+    }
 
     const getElementId = (element: Element): string => {
-        const existingId = element.getAttribute('data-viewprint-id')
-        if (existingId && /^e\d+$/.test(existingId) && !idsInSnapshot.has(existingId)) {
-            idsInSnapshot.add(existingId)
-            const numericId = Number(existingId.slice(1))
-            nextElementId = Math.max(nextElementId, numericId + 1)
-            return existingId
-        }
-
-        while (idsInSnapshot.has(`e${nextElementId}`)) {
-            nextElementId += 1
-        }
-        const newId = `e${nextElementId}`
-        nextElementId += 1
-        idsInSnapshot.add(newId)
-        return newId
+        const previousId = registry.ids.get(element)
+        const id = previousId && !idsInSnapshot.has(previousId)
+            ? previousId
+            : `e${registry.nextId++}`
+        idsInSnapshot.add(id)
+        registry.ids.set(element, id)
+        registry.elements.set(id, new WeakRef(element))
+        return id
     }
 
     function getVisibleText(element: Element): string | undefined {
@@ -134,10 +144,8 @@ export function extractSnapshotData(): RawSnapshotElement[] {
 
     elements.forEach((element) => {
         const id = getElementId(element)
-        element.setAttribute('data-viewprint-id', id)
-        elementToId.set(element, id)
         const parentId = element.parentElement
-            ? elementToId.get(element.parentElement)
+            ? registry.ids.get(element.parentElement)
             : undefined
 
         const tag = element.tagName.toLowerCase()
@@ -173,7 +181,6 @@ export function extractSnapshotData(): RawSnapshotElement[] {
         })
     })
 
-    viewPrintWindow.__viewPrintNextElementId = nextElementId
     return result
 }
 
@@ -427,7 +434,7 @@ export function inspectElement(elementId: string): ElementNode | null {
         const cascade = buildPseudoCascade(style, matchingRules)
         const computedStyles = buildPseudoComputedStyles(style, cascade)
 
-        const elementId = element.getAttribute('data-viewprint-id') || 'unknown'
+        const elementId = registry?.ids.get(element) || 'unknown'
 
         return {
             id: `${elementId}::${pseudo.slice(2)}`,
@@ -551,7 +558,9 @@ export function inspectElement(elementId: string): ElementNode | null {
         return num
     }
 
-    const element = document.querySelector(`[data-viewprint-id="${elementId}"]`)
+    const registryHost = window as unknown as Record<PropertyKey, unknown>
+    const registry = registryHost[Symbol.for('starframe.viewprint.element-registry.v1')] as ElementRegistry | undefined
+    const element = registry?.elements.get(elementId)?.deref()
     if (!element) {
         return null
     }
