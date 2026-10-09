@@ -36,7 +36,7 @@
 - [x] Добавлены acceptance-тесты на security, recovery, storage, frames, diff/dialog, packaging, CLI, performance, network и tracing.
 - [ ] Packed tarball содержит только опубликованные файлы; установка во временный проект подтверждает library import и `viewprint --help`. (Не перепроверено после изменения сборки.)
 - [ ] Smoke-проверка установленного пакета подтверждает daemon start/status/stop/restart и прямой запуск через library API. (Не перепроверено после изменения сборки.)
-- [x] CI workflow настроен для Node 20 и 22, установки Playwright Chromium и lint/test/build/pack/smoke; GitHub Actions execution ещё не запускался в этой сессии.
+- [ ] CI workflow настроен для Node 22 (Node 20 не поддерживается: pnpm 11.9 требует Node ≥ 22.13), установки Playwright Chromium и lint/test/build/pack/smoke. Зелёный run на GitHub ещё не получен (run 37978615788 на d57a425 упал).
 - [x] README и checked acceptance-пункты не описывают placeholders/no-op как готовые функции.
 
 ## Контекст проверок
